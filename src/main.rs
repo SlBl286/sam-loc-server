@@ -45,14 +45,5 @@ async fn main() -> Result<(), IoError> {
 
 }
 
-// async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
-//     println!("Incoming TCP connection from: {}", addr);
 
-//     let ws_stream = accept_async(stream)
-//         .await
-//         .expect("Error during the websocket handshake occurred");
-//     let (tx, rx) = unbounded();
-//     let (outgoing, incoming) = ws_stream.get_ref().split();
-
-   
-// }
+mod lobby;
