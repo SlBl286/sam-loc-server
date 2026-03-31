@@ -1,0 +1,10 @@
+[package]
+name = "sam-loc-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+futures-channel = "0.3.32"
+futures-util = { version = "0.3.32", default-features = false, features = ["sink", "std"] }
+tokio = { version = "1.5.0", features = ["full"] }
+tokio-tungstenite = {version = "0.29.0", features = ["native-tls"]}
