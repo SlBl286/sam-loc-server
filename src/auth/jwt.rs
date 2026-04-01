@@ -1,18 +1,22 @@
-use jsonwebtoken::{decode, DecodingKey, Validation};
-use serde::Deserialize;
-#[derive(Deserialize)]
-pub struct Claims {
-    pub user_id: u64,
-}
-pub fn verify_token(token: &str) -> Result<u64, String> {
-    let decoded = decode::<Claims>(
-        token,
-        &DecodingKey::from_secret("secret".as_ref()),
-        &Validation::default(),
-    );
+use jsonwebtoken::{encode, EncodingKey, Header};
+use serde::{Serialize, Deserialize};
 
-    match decoded {
-        Ok(data) => Ok(data.claims.user_id),
-        Err(_) => Err("Invalid token".to_string()),
-    }
+#[derive(Serialize, Deserialize)]
+pub struct Claims {
+    pub user_id: i64,
+    pub exp: usize,
+}
+
+pub fn create_token(user_id: i64) -> String {
+    let claims = Claims {
+        user_id,
+        exp: 2000000000,
+    };
+
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret("secret".as_ref()),
+    )
+    .unwrap()
 }

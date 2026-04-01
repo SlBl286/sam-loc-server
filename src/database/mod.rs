@@ -1,9 +1,11 @@
-mod user_repo;
+pub mod user_repo;
 
+use std::env;
 
-use sqlx::{Database, Error, PgPool};
+use dotenvy::dotenv;
+use sqlx::{Error, PgPool};
 
-pub async fn init_db() -> Result<PgPool,Error> {
-    PgPool::connect("postgres://postgres:password@localhost/game_server")
-        .await
+pub async fn init_db(db_url: String) -> Result<PgPool, Error> {
+
+    PgPool::connect(&db_url).await
 }

@@ -138,7 +138,7 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) -> Result<(), Er
     Ok(())
 }
 
-pub async fn start_server(host: String) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn start_ws_server(host: String) ->  Result<(), Error>  {
     let listener = TcpListener::bind(host.clone()).await.unwrap();
 
     println!("WebSocket server listen at ws://{}", host);

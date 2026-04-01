@@ -1,3 +1,3 @@
-mod jwt;
-mod auth_service;
-mod password;
+pub(crate) mod jwt;
+pub mod auth_service;
+pub(crate) mod password;

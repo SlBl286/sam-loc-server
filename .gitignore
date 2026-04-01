@@ -1,1 +1,5 @@
 /target
+
+// Ignore the .env file which contains sensitive information like database credentials
+.env
+
