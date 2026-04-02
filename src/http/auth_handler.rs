@@ -1,3 +1,4 @@
+use axum::http::StatusCode;
 use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -23,13 +24,13 @@ pub struct LoginResponse {
 pub async fn login(
     State(db): State<PgPool>,
     Json(req): Json<LoginRequest>,
-) -> Result<Json<LoginResponse>, String> {
+) -> Result<Json<LoginResponse>,  (StatusCode, String)> {
     let user = get_user_by_username(&db, &req.username)
         .await
-        .ok_or("User not found")?;
+        .ok_or((StatusCode::NOT_FOUND,"User not found".to_string()))?;
 
     if !verify_password(&req.password, &user.password_hash) {
-        return Err("Invalid password".into());
+        return Err((StatusCode::UNAUTHORIZED, "Invalid password".to_string()));
     }
 
     let token = create_token(user.id);
