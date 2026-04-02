@@ -2,7 +2,9 @@ use std::{env, io::Error as IoError};
 
 use dotenvy::dotenv;
 
-use crate::{database::init_db, http::server::start_http_server, lobby::start_ws_server};
+use crate::{
+    database::init_db, http::server::start_http_server, network::ws_server::start_ws_server,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), IoError> {
@@ -23,8 +25,10 @@ async fn main() -> Result<(), IoError> {
     Ok(())
 }
 
+
 mod auth;
+mod room;
 mod database;
 mod http;
-mod lobby;
 mod network;
+mod player;
