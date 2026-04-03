@@ -1,9 +1,9 @@
 
-use crate::{player::Player, room::room_status::RoomStatus};
+use crate::{player::Session, room::room_status::RoomStatus};
 
 pub struct Room {
     id: u32,
-    players: Vec<Player>,
+    players: Vec<i64>,
     max_players: u8,
     status: RoomStatus,
 }

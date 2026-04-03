@@ -11,7 +11,6 @@ async fn main() -> Result<(), IoError> {
     dotenv().ok();
     let host = env::var("HOST").expect("HOST must be set");
     let ws_host = env::var("WS_HOST").expect("WS_HOST must be set");
-
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
 
     let db = init_db(db_url)
@@ -32,3 +31,4 @@ mod database;
 mod http;
 mod network;
 mod player;
+mod message;
