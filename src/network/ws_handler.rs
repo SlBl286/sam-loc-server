@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::Arc};
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::{net::TcpStream, sync::mpsc};
@@ -7,10 +7,17 @@ use tokio_tungstenite::{
     tungstenite::{Error, Message},
 };
 
-use crate::player::{Session, session_manager::SessionManager};
-
-pub async fn accept_connection(stream: TcpStream, addr: SocketAddr, session_manager: &SessionManager ) {
-    match handle_connection(stream, addr,session_manager).await {
+use crate::{
+    app_state::AppState,
+    message::{client_message::ClientMessage, server_message::ServerMessage},
+    player::{Session, session_manager::SessionManager},
+    room::room_manager::RoomManager,
+};
+struct ConnectionContext {
+    player_id: Option<u64>,
+}
+pub async fn accept_connection(stream: TcpStream, addr: SocketAddr, app_state: Arc<AppState>) {
+    match handle_connection(stream, addr, app_state).await {
         Err(e) => match e {
             Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8(_) => (),
             err => eprintln!("Error processing connection: {}", err),
@@ -19,21 +26,142 @@ pub async fn accept_connection(stream: TcpStream, addr: SocketAddr, session_mana
     }
 }
 
-pub async fn handle_connection(stream: TcpStream, addr: SocketAddr, session_manager: &SessionManager ) -> Result<(), Error> {
+pub async fn handle_connection(
+    stream: TcpStream,
+    addr: SocketAddr,
+    state: Arc<AppState>,
+) -> Result<(), Error> {
     match accept_async(stream).await {
         Ok(ws_stream) => {
+            let mut ctx = ConnectionContext { player_id: None };
             let (mut write, mut read) = ws_stream.split();
             let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
-            session_manager.add_session(Session::new(user_id, None, tx));
+            tokio::spawn(async move {
+                while let Some(msg) = rx.recv().await {
+                    if let Err(e) = write.send(msg).await {
+                        println!("Send error: {}", e);
+                        break;
+                    }
+                }
+            });
             while let Some(msg) = read.next().await {
                 match msg {
                     Ok(Message::Text(text)) => {
-                        println!("recv: {}", text.as_str());
-                        let _ = write.send(Message::text("")).await;
+                        // parse JSON
+                        let parsed = serde_json::from_str::<ClientMessage>(&text);
+                        println!("Parsed message: {:?}", parsed);
+
+                        let response = match parsed {
+                            Ok(ClientMessage::Connected { user_id }) => {
+                                println!("user {} connected", user_id);
+                                ctx.player_id = Some(user_id);
+                                state.session_manager.add_session(Session::new(
+                                    user_id,
+                                    None,
+                                    tx.clone(),
+                                ));
+                                ServerMessage::RoomList {
+                                    rooms: state.room_manager.get_rooms().await,
+                                }
+                            }
+                            Ok(ClientMessage::Disconnected) => {
+                                if let Some(uid) = ctx.player_id {
+                                    state.session_manager.remove_session(uid);
+                                    println!("user {} disconnected", uid);
+                                }
+                                ServerMessage::Error {
+                                    message: "Disconnected".to_string(),
+                                }
+                            }
+
+                            Ok(ClientMessage::CreateRoom {
+                                room_name,
+                                max_players,
+                            }) => {
+                                let room_id = state.id_generator.generate_id();
+                                state
+                                    .room_manager
+                                    .create_room(room_id, room_name, max_players)
+                                    .await;
+                                let room_list_msg = ServerMessage::RoomList {
+                                    rooms: state.room_manager.get_rooms().await,
+                                };
+                                let json = serde_json::to_string(&room_list_msg).unwrap();
+                                state
+                                    .session_manager
+                                    .broadcast_all(Message::Text(json.into()));
+                                println!("current players: {:?}", state.session_manager.sessions);
+                                if let Some(player_id) = ctx.player_id {
+                                    let seat_index = state
+                                        .room_manager
+                                        .add_player_to_room(room_id, player_id)
+                                        .await;
+
+                                    ServerMessage::PlayerJoinedRoom {
+                                        user_id: player_id,
+                                        room_id,
+                                        seat_index,
+                                    }
+                                } else {
+                                    ServerMessage::Error {
+                                        message: "Create room failed".to_string(),
+                                    }
+                                }
+                            }
+                            Ok(ClientMessage::JoinRoom { room_id }) => {
+                                if let Some(player_id) = ctx.player_id {
+                                    let seat_index = state
+                                        .room_manager
+                                        .add_player_to_room(room_id, player_id)
+                                        .await;
+                                    ServerMessage::PlayerJoinedRoom {
+                                        user_id: player_id,
+                                        room_id,
+                                        seat_index,
+                                    }
+                                } else {
+                                    ServerMessage::Error {
+                                        message: "Join room failed".to_string(),
+                                    }
+                                }
+                            }
+                            Ok(ClientMessage::LeaveRoom { room_id }) => {
+                                if let Some(player_id) = ctx.player_id {
+                                    state
+                                        .room_manager
+                                        .remove_player_from_room(room_id, player_id)
+                                        .await;
+                                    ServerMessage::PlayerLeftRoom {
+                                        user_id: player_id,
+                                        room_id,
+                                    }
+                                } else {
+                                    ServerMessage::Error {
+                                        message: "Leave room failed".to_string(),
+                                    }
+                                }
+                            }
+                            Ok(_) => ServerMessage::Error {
+                                message: "Unknown message type".to_string(),
+                            },
+                            Err(e) => ServerMessage::Error {
+                                message: format!("Invalid message: {}", e),
+                            },
+                        };
+
+                        // send response
+                        let json = serde_json::to_string(&response).unwrap();
+                        if let Err(e) = tx.send(Message::Text(json.into())) {
+                            println!("Send error {}: {}", addr, e);
+                            break;
+                        }
                     }
 
                     Ok(Message::Close(frame)) => {
-                        println!("Client {} closed: {:?}", addr, frame);
+                        println!("Client {:?} closed.", ctx.player_id.unwrap_or(0));
+                        if let Some(uid) = ctx.player_id {
+                            state.session_manager.remove_session(uid);
+                        }
                         break;
                     }
                     Ok(_) => {
@@ -41,7 +169,10 @@ pub async fn handle_connection(stream: TcpStream, addr: SocketAddr, session_mana
                     }
                     Err(e) => match e {
                         Error::Protocol(e) => {
-                            println!("Client {} disconnected unexpectedly", addr);
+                            println!("Client {:?} disconnected unexpectedly", ctx.player_id.unwrap_or(0));
+                            if let Some(uid) = ctx.player_id {
+                                state.session_manager.remove_session(uid);
+                            }
                             break;
                         }
 

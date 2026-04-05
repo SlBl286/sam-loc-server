@@ -1,17 +1,22 @@
 
-use crate::{player::Session, room::room_status::RoomStatus};
+use serde::Serialize;
 
+use crate::{ room::room_status::RoomStatus};
+
+#[derive(Clone,Debug, Serialize)]
 pub struct Room {
     id: u32,
-    players: Vec<i64>,
+    name: String,
+    players: Vec<u64>,
     max_players: u8,
     status: RoomStatus,
 }
 
 impl Room {
-   pub fn new(id: u32, max_players: u8) -> Self {
+   pub fn new(id: u32, name: String, max_players: u8) -> Self {
         Room {
             id,
+            name,
             players: Vec::new(),
             max_players,
             status: RoomStatus::Waiting,

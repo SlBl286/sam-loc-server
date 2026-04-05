@@ -1,18 +1,29 @@
+use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 pub type Tx = mpsc::UnboundedSender<Message>;
 
-#[derive(Clone)]
-pub struct Session  {
-    pub user_id: i64,
+#[derive(Clone, Debug)]
+pub struct Session {
+    pub user_id: u64,
     pub room_id: Option<u32>,
-    pub sender : Tx,
+    pub sender: Tx,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UserInfo {
+    pub user_id: u64,
+    pub room_id: Option<u32>,
 }
 
 impl Session {
-    pub fn new(user_id:i64,room_id: Option<u32>,sender:Tx)-> Self{
-        Session { user_id, room_id, sender}
+    pub fn new(user_id: u64, room_id: Option<u32>, sender: Tx) -> Self {
+        Session {
+            user_id,
+            room_id,
+            sender,
+        }
     }
 }
 
