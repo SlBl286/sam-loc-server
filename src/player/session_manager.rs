@@ -23,6 +23,7 @@ impl SessionManager {
             let _ = old.sender.send(Message::Close(None));
         }
     }
+
     pub fn remove_session(&self, user_id: u64) {
         self.sessions.remove(&user_id);
         println!("Removed session {}", user_id);
@@ -31,10 +32,12 @@ impl SessionManager {
         self.sessions.get(user_id).map(|s| s.clone())
     }
     pub fn get_all_sessions(&self) -> Vec<UserInfo> {
-        self.sessions.iter().map(|entry| UserInfo {
-            user_id: entry.value().user_id,
-            room_id: entry.value().room_id, // You might want to populate this with actual user names
-        }).collect()
+        self.sessions
+            .iter()
+            .map(|entry| UserInfo {
+                user_id: entry.value().user_id, // You might want to populate this with actual user names
+            })
+            .collect()
     }
 
     // ===== SEND TO ONE PLAYER =====

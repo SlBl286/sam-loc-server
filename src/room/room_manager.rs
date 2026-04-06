@@ -55,10 +55,18 @@ impl RoomManager {
         0
     }
 
-    pub async fn remove_player_from_room(&self, room_id: u32, player_id: u64) {
+    pub fn remove_room(&self, room_id: u32) {
+        self.rooms.remove(&room_id);
+        println!("Removed room {}", room_id);
+    }
+    pub async fn remove_player_from_room(&self, room_id: u32, player_id: u64){
         if let Some(mut room) = self.rooms.get_mut(&room_id) {
             room.players
-                .retain(|s| s as *const _ != player_id as *const _);
+                .retain(|s| *s  != player_id );
+
+            if room.players.len() == 0 {
+                self.remove_room(room_id);
+            }
         }
     }
     pub fn broadcast_room(

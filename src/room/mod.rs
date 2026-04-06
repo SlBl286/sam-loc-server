@@ -22,6 +22,10 @@ impl Room {
             status: RoomStatus::Waiting,
         }
     }
+
+    pub fn get_num_players(&self)-> usize {
+        self.players.len()
+    }
 }
 
 
