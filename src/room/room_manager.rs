@@ -1,4 +1,3 @@
-
 use std::sync::atomic::AtomicU32;
 
 use dashmap::DashMap;
@@ -15,14 +14,16 @@ pub struct IdGenerator {
 
 impl IdGenerator {
     pub fn new() -> Self {
-        IdGenerator { last_id: AtomicU32::new(0) }
+        IdGenerator {
+            last_id: AtomicU32::new(0),
+        }
     }
 
     pub fn generate_id(&self) -> u32 {
-        self.last_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        self.last_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 }
-
 
 impl RoomManager {
     pub fn new() -> Self {
@@ -37,7 +38,7 @@ impl RoomManager {
             .map(|entry| entry.value().clone())
             .collect()
     }
-    pub async fn create_room(&self,room_id: u32, room_name: String, max_players: Option<u8>){
+    pub async fn create_room(&self, room_id: u32, room_name: String, max_players: Option<u8>) {
         self.rooms.insert(
             room_id,
             Room::new(room_id, room_name, max_players.unwrap_or(5)),
@@ -59,14 +60,17 @@ impl RoomManager {
         self.rooms.remove(&room_id);
         println!("Removed room {}", room_id);
     }
-    pub async fn remove_player_from_room(&self, room_id: u32, player_id: u64){
+    pub async fn remove_player_from_room(&self, room_id: u32, player_id: u64) {
+        let mut remove_room = false;
         if let Some(mut room) = self.rooms.get_mut(&room_id) {
-            room.players
-                .retain(|s| *s  != player_id );
+            room.players.retain(|s| *s != player_id);
 
-            if room.players.len() == 0 {
-                self.remove_room(room_id);
+            if room.players.is_empty() {
+                remove_room = true;
             }
+        }
+        if remove_room {
+            self.remove_room(room_id);
         }
     }
     pub fn broadcast_room(

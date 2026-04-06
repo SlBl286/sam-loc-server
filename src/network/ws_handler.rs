@@ -90,19 +90,20 @@ pub async fn handle_connection(
                                     .room_manager
                                     .create_room(room_id, room_name, max_players)
                                     .await;
-                                let room_list_msg = ServerMessage::RoomList {
-                                    rooms: state.room_manager.get_rooms().await,
-                                };
-                                let json = serde_json::to_string(&room_list_msg).unwrap();
-                                state
-                                    .session_manager
-                                    .broadcast_all(Message::Text(json.into()));
+
                                 if let Some(player_id) = ctx.player_id {
                                     let seat_index = state
                                         .room_manager
                                         .add_player_to_room(room_id, player_id)
                                         .await;
                                     ctx.room_id = Some(room_id);
+                                    let room_list_msg = ServerMessage::RoomList {
+                                        rooms: state.room_manager.get_rooms().await,
+                                    };
+                                    let json = serde_json::to_string(&room_list_msg).unwrap();
+                                    state
+                                        .session_manager
+                                        .broadcast_all(Message::Text(json.into()));
                                     ServerMessage::PlayerJoinedRoom {
                                         user_id: player_id,
                                         room_id,
@@ -194,7 +195,7 @@ pub async fn handle_connection(
                                     state.room_manager.remove_player_from_room(rid, uid).await;
                                     let room = state.room_manager.get_room(&rid).await;
                                     if let Some(r) = room {
-                                        println!("{}",r.get_num_players())
+                                        println!("{}", r.get_num_players())
                                     }
                                 }
                                 state.session_manager.remove_session(uid);
@@ -205,8 +206,7 @@ pub async fn handle_connection(
                         e => {
                             println!("Error: {}", e);
                             if let Some(uid) = ctx.player_id {
-                                if let Some(rid) = ctx.room_id
-                                {
+                                if let Some(rid) = ctx.room_id {
                                     state.room_manager.remove_player_from_room(rid, uid).await;
                                 }
                                 state.session_manager.remove_session(uid);
