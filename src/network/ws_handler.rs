@@ -6,6 +6,7 @@ use tokio_tungstenite::{
     accept_async,
     tungstenite::{Error, Message, protocol::frame::coding::CloseCode},
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     app_state::AppState,
@@ -43,6 +44,8 @@ pub async fn handle_connection(
             };
             let (mut write, mut read) = ws_stream.split();
             let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+            let cancel = CancellationToken::new();
+
             tokio::spawn(async move {
                 while let Some(msg) = rx.recv().await {
                     if let Err(e) = write.send(msg).await {
@@ -52,6 +55,9 @@ pub async fn handle_connection(
                 }
             });
             while let Some(msg) = read.next().await {
+                if cancel.is_cancelled() {
+                    break;
+                }
                 match msg {
                     Ok(Message::Text(text)) => {
                         // parse JSON
@@ -61,9 +67,11 @@ pub async fn handle_connection(
                             Ok(ClientMessage::Connected { user_id }) => {
                                 println!("user {} connected", user_id);
                                 ctx.player_id = Some(user_id);
-                                state
-                                    .session_manager
-                                    .add_session(Session::new(user_id, tx.clone()));
+                                state.session_manager.add_session(Session::new(
+                                    user_id,
+                                    tx.clone(),
+                                    cancel.clone(),
+                                ));
                                 ServerMessage::RoomList {
                                     rooms: state.room_manager.get_rooms().await,
                                 }

@@ -1,6 +1,7 @@
 use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_util::sync::CancellationToken;
 
 pub type Tx = mpsc::UnboundedSender<Message>;
 
@@ -8,6 +9,7 @@ pub type Tx = mpsc::UnboundedSender<Message>;
 pub struct Session {
     pub user_id: u64,
     pub sender: Tx,
+    pub cancel: CancellationToken,
 }
 
 #[derive(Debug, Serialize)]
@@ -16,10 +18,11 @@ pub struct UserInfo {
 }
 
 impl Session {
-    pub fn new(user_id: u64, sender: Tx) -> Self {
+    pub fn new(user_id: u64, sender: Tx, cancel: CancellationToken) -> Self {
         Session {
             user_id,
             sender,
+            cancel
         }
     }
 }
