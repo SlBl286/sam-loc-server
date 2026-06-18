@@ -35,3 +35,4 @@ mod message;
 mod helper;
 
 mod app_state;
+mod game;

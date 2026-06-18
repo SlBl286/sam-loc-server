@@ -11,6 +11,23 @@ pub enum ServerMessage {
     RemovePlayer { room_id: u32, user_id: u64 },
     RoomList { rooms: Vec<Room>},
     PlayerList { players: Vec<UserInfo> },
+    RoomInfo { room: Room },
 
     Error { message: String },
+
+    PlayerReadyUpdated { user_id: u64, ready: bool },
+    GameStarted { hand: Vec<u8> },
+    TurnUpdated { 
+        active_player_id: u64, 
+        last_played_cards: Vec<u8>, 
+        last_played_by: Option<u64>,
+        player_card_counts: std::collections::HashMap<u64, usize>,
+        passed_players: Vec<u64>,
+    },
+    SamAnnounced { player_id: u64 },
+    GameEnded { 
+        winner_id: u64, 
+        reason: String, 
+        hands: std::collections::HashMap<u64, Vec<u8>> 
+    },
 }
