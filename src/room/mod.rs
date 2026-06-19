@@ -16,6 +16,7 @@ pub struct GameState {
     pub last_played_by: Option<u64>,
     pub passed_players: Vec<u64>,
     pub sam_announcer: Option<u64>,
+    pub turn_count: u32,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -27,13 +28,14 @@ pub struct Room {
     pub status: RoomStatus,
     pub bet_size: u64,
     pub password: Option<String>,
+    pub turn_limit: u32,
 
     pub ready_players: Vec<u64>,
     pub game_state: Option<GameState>,
 }
 
 impl Room {
-    pub fn new(id: u32, name: String, max_players: u8, bet_size: u64, password: Option<String>) -> Self {
+    pub fn new(id: u32, name: String, max_players: u8, bet_size: u64, password: Option<String>, turn_limit: Option<u32>) -> Self {
         Room {
             id,
             name,
@@ -42,6 +44,7 @@ impl Room {
             status: RoomStatus::Waiting,
             bet_size,
             password,
+            turn_limit: turn_limit.unwrap_or(15),
             ready_players: Vec::new(),
             game_state: None,
         }
@@ -52,6 +55,10 @@ impl Room {
     }
 
     pub fn set_player_ready(&mut self, player_id: u64, ready: bool) {
+        // Only allow changing ready status if game is waiting
+        if self.status != RoomStatus::Waiting {
+            return;
+        }
         if ready {
             if !self.ready_players.contains(&player_id) {
                 self.ready_players.push(player_id);
@@ -100,6 +107,7 @@ impl Room {
                         last_played_by: None,
                         passed_players: Vec::new(),
                         sam_announcer: None,
+                        turn_count: 0,
                     });
                     return Ok(Some((player, reason)));
                 }
@@ -116,6 +124,7 @@ impl Room {
             last_played_by: None,
             passed_players: Vec::new(),
             sam_announcer: None,
+            turn_count: 0,
         });
 
         Ok(None)
@@ -172,7 +181,7 @@ impl Room {
         state.last_played_by = Some(player_id);
 
         // Find next player who hasn't passed
-        let next_player = get_next_player(&self.players, player_id, &state.passed_players);
+        let next_player = get_next_player(&self.players, player_id, &state.passed_players, &state.hands);
 
         // If turn goes back to the last person who played, reset round
         if Some(next_player) == state.last_played_by {
@@ -182,6 +191,7 @@ impl Room {
         }
 
         state.active_player = next_player;
+        state.turn_count += 1;
         Ok(false)
     }
 
@@ -201,7 +211,7 @@ impl Room {
             state.passed_players.push(player_id);
         }
 
-        let next_player = get_next_player(&self.players, player_id, &state.passed_players);
+        let next_player = get_next_player(&self.players, player_id, &state.passed_players, &state.hands);
 
         if Some(next_player) == state.last_played_by {
             state.last_played_cards.clear();
@@ -210,6 +220,7 @@ impl Room {
         }
 
         state.active_player = next_player;
+        state.turn_count += 1;
         Ok(())
     }
 
@@ -218,16 +229,22 @@ impl Room {
         let state = self.game_state.as_mut().ok_or("Trận đấu chưa bắt đầu!")?;
         state.sam_announcer = Some(player_id);
         state.active_player = player_id;
+        state.turn_count += 1;
         Ok(())
     }
 }
 
-fn get_next_player(players: &[u64], current: u64, passed: &[u64]) -> u64 {
+fn get_next_player(
+    players: &[u64],
+    current: u64,
+    passed: &[u64],
+    hands: &std::collections::HashMap<u64, Vec<u8>>,
+) -> u64 {
     let pos = players.iter().position(|&p| p == current).unwrap_or(0);
     for i in 1..players.len() {
         let next_idx = (pos + i) % players.len();
         let next_player = players[next_idx];
-        if !passed.contains(&next_player) {
+        if hands.contains_key(&next_player) && !passed.contains(&next_player) {
             return next_player;
         }
     }

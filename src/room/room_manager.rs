@@ -45,6 +45,7 @@ impl RoomManager {
         max_players: Option<u8>,
         bet_size: Option<u64>,
         password: Option<String>,
+        turn_limit: Option<u32>,
     ) {
         self.rooms.insert(
             room_id,
@@ -54,6 +55,7 @@ impl RoomManager {
                 max_players.unwrap_or(5),
                 bet_size.unwrap_or(1000),
                 password,
+                turn_limit,
             ),
         );
     }

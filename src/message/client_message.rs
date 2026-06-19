@@ -11,6 +11,7 @@ pub enum ClientMessage {
     max_players: Option<u8>,
     bet_size: Option<u64>,
     password: Option<String>,
+    turn_limit: Option<u32>,
   },
   JoinRoom {room_id : u32},
   LeaveRoom {room_id : u32},

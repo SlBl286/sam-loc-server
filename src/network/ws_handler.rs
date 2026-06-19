@@ -66,12 +66,14 @@ pub async fn handle_connection(
                         let response = match parsed {
                             Ok(ClientMessage::Connected { user_id }) => {
                                 println!("user {} connected", user_id);
-                                ctx.player_id = Some(user_id);
-                                state.session_manager.add_session(Session::new(
-                                    user_id,
-                                    tx.clone(),
-                                    cancel.clone(),
-                                ));
+                                if ctx.player_id != Some(user_id) {
+                                    ctx.player_id = Some(user_id);
+                                    state.session_manager.add_session(Session::new(
+                                        user_id,
+                                        tx.clone(),
+                                        cancel.clone(),
+                                    ));
+                                }
                                 ServerMessage::RoomList {
                                     rooms: state.room_manager.get_rooms().await,
                                 }
@@ -92,11 +94,12 @@ pub async fn handle_connection(
                                 max_players,
                                 bet_size,
                                 password,
+                                turn_limit,
                             }) => {
                                 let room_id = state.id_generator.generate_id();
                                 state
                                     .room_manager
-                                    .create_room(room_id, room_name, max_players, bet_size, password)
+                                    .create_room(room_id, room_name, max_players, bet_size, password, turn_limit)
                                     .await;
 
                                 if let Some(player_id) = ctx.player_id {
@@ -223,6 +226,7 @@ pub async fn handle_connection(
                                                                         winner_id,
                                                                         reason: reason.to_string(),
                                                                         hands: game_state.hands.clone(),
+                                                                        sam_announcer: game_state.sam_announcer,
                                                                     };
                                                                     RoomManager::broadcast_room(&state.session_manager, &updated_room.players, &end_msg);
                                                                 } else {
@@ -239,6 +243,15 @@ pub async fn handle_connection(
                                                                         passed_players: Vec::new(),
                                                                     };
                                                                     RoomManager::broadcast_room(&state.session_manager, &updated_room.players, &turn_msg);
+
+                                                                    // Start countdown timer for first player
+                                                                    start_turn_timer(
+                                                                        state.clone(),
+                                                                        room_id,
+                                                                        game_state.active_player,
+                                                                        game_state.turn_count,
+                                                                        updated_room.turn_limit,
+                                                                    );
                                                                 }
                                                             }
                                                         }
@@ -274,6 +287,7 @@ pub async fn handle_connection(
                                                                 winner_id: player_id,
                                                                 reason: "Đã đánh hết bài".to_string(),
                                                                 hands: game_state.hands.clone(),
+                                                                sam_announcer: game_state.sam_announcer,
                                                             };
                                                             RoomManager::broadcast_room(&state.session_manager, &room.players, &end_msg);
                                                         } else {
@@ -289,6 +303,14 @@ pub async fn handle_connection(
                                                                 passed_players: game_state.passed_players.clone(),
                                                             };
                                                             RoomManager::broadcast_room(&state.session_manager, &room.players, &turn_msg);
+
+                                                            start_turn_timer(
+                                                                state.clone(),
+                                                                room_id,
+                                                                game_state.active_player,
+                                                                game_state.turn_count,
+                                                                room.turn_limit,
+                                                            );
                                                         }
                                                     }
                                                 }
@@ -446,10 +468,123 @@ async fn handle_player_disconnect(
         state.session_manager.broadcast_all(Message::Text(json.into()));
 
         // Broadcast RoomInfo to remaining players
-        if let Some(room) = state.room_manager.get_room(&rid).await {
-            let info_msg = ServerMessage::RoomInfo { room: room.clone() };
-            RoomManager::broadcast_room(&state.session_manager, &room.players, &info_msg);
-        }
-    }
-    state.session_manager.remove_session(player_id);
-}
+                                        if let Some(room) = state.room_manager.get_room(&rid).await {
+                                            let info_msg = ServerMessage::RoomInfo { room: room.clone() };
+                                            RoomManager::broadcast_room(&state.session_manager, &room.players, &info_msg);
+                                        }
+                                    }
+                                    state.session_manager.remove_session(player_id);
+                                }
+
+                                pub fn start_turn_timer(
+                                    state: Arc<AppState>,
+                                    room_id: u32,
+                                    player_id: u64,
+                                    expected_turn_count: u32,
+                                    secs: u32,
+                                ) {
+                                    tokio::spawn(async move {
+                                        tokio::time::sleep(tokio::time::Duration::from_secs(secs as u64)).await;
+
+                                        let room_opt = state.room_manager.get_room(&room_id).await;
+                                        if let Some(room) = room_opt {
+                                            if room.status == crate::room::room_status::RoomStatus::Playing {
+                                                if let Some(game_state) = &room.game_state {
+                                                    if game_state.active_player == player_id && game_state.turn_count == expected_turn_count {
+                                                        println!("Room {} Player {} turn timed out!", room_id, player_id);
+
+                                                        let auto_play_cards = game_state.last_played_cards.is_empty();
+                                                        let mut auto_cards = Vec::new();
+
+                                                        if auto_play_cards {
+                                                            if let Some(hand) = game_state.hands.get(&player_id) {
+                                                                if !hand.is_empty() {
+                                                                    let mut sorted_hand = hand.clone();
+                                                                    sorted_hand.sort_by(|a, b| {
+                                                                        let get_w = |c: u8| {
+                                                                            let r = c / 4;
+                                                                            if r == 12 { return 15; } // 2
+                                                                            if r == 11 { return 14; } // A
+                                                                            r + 3
+                                                                        };
+                                                                        get_w(*a).cmp(&get_w(*b))
+                                                                    });
+                                                                    auto_cards.push(sorted_hand[0]); // lowest card
+                                                                }
+                                                            }
+                                                        }
+
+                                                        let mut game_ended = false;
+                                                        let mut action_success = false;
+                                                        let mut error_msg = None;
+
+                                                        if auto_play_cards && !auto_cards.is_empty() {
+                                                            if let Some(play_res) = state.room_manager.play_room_cards(room_id, player_id, &auto_cards).await {
+                                                                match play_res {
+                                                                    Ok(ended) => {
+                                                                        game_ended = ended;
+                                                                        action_success = true;
+                                                                    }
+                                                                    Err(e) => {
+                                                                        error_msg = Some(e);
+                                                                    }
+                                                                }
+                                                            }
+                                                        } else {
+                                                            if let Some(pass_res) = state.room_manager.pass_room_turn(room_id, player_id).await {
+                                                                match pass_res {
+                                                                    Ok(_) => {
+                                                                        action_success = true;
+                                                                    }
+                                                                    Err(e) => {
+                                                                        error_msg = Some(e);
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+
+                                                        if action_success {
+                                                            if let Some(updated_room) = state.room_manager.get_room(&room_id).await {
+                                                                if let Some(updated_game_state) = &updated_room.game_state {
+                                                                    if game_ended {
+                                                                        let end_msg = ServerMessage::GameEnded {
+                                                                            winner_id: player_id,
+                                                                            reason: "Hết giờ - Tự động bỏ lượt".to_string(),
+                                                                            hands: updated_game_state.hands.clone(),
+                                                                            sam_announcer: updated_game_state.sam_announcer,
+                                                                        };
+                                                                        RoomManager::broadcast_room(&state.session_manager, &updated_room.players, &end_msg);
+                                                                    } else {
+                                                                        let mut card_counts = std::collections::HashMap::new();
+                                                                        for (&p_id, hand) in &updated_game_state.hands {
+                                                                            card_counts.insert(p_id, hand.len());
+                                                                        }
+
+                                                                        let turn_msg = ServerMessage::TurnUpdated {
+                                                                            active_player_id: updated_game_state.active_player,
+                                                                            last_played_cards: if auto_play_cards { auto_cards } else { Vec::new() },
+                                                                            last_played_by: if auto_play_cards { Some(player_id) } else { updated_game_state.last_played_by },
+                                                                            player_card_counts: card_counts,
+                                                                            passed_players: updated_game_state.passed_players.clone(),
+                                                                        };
+                                                                        RoomManager::broadcast_room(&state.session_manager, &updated_room.players, &turn_msg);
+
+                                                                        start_turn_timer(
+                                                                            state.clone(),
+                                                                            room_id,
+                                                                            updated_game_state.active_player,
+                                                                            updated_game_state.turn_count,
+                                                                            updated_room.turn_limit,
+                                                                        );
+                                                                    }
+                                                                }
+                                                            }
+                                                        } else if let Some(err) = error_msg {
+                                                            println!("Auto turn action failed: {}", err);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    });
+                                }

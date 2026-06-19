@@ -28,6 +28,7 @@ pub enum ServerMessage {
     GameEnded { 
         winner_id: u64, 
         reason: String, 
-        hands: std::collections::HashMap<u64, Vec<u8>> 
+        hands: std::collections::HashMap<u64, Vec<u8>>,
+        sam_announcer: Option<u64>,
     },
 }
