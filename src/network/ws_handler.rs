@@ -229,6 +229,11 @@ pub async fn handle_connection(
                                                                         sam_announcer: game_state.sam_announcer,
                                                                     };
                                                                     RoomManager::broadcast_room(&state.session_manager, &updated_room.players, &end_msg);
+                                                                    state.room_manager.reset_room_game_state(room_id).await;
+                                                                    if let Some(fresh_room) = state.room_manager.get_room(&room_id).await {
+                                                                        let info_msg = ServerMessage::RoomInfo { room: fresh_room.clone() };
+                                                                        RoomManager::broadcast_room(&state.session_manager, &fresh_room.players, &info_msg);
+                                                                    }
                                                                 } else {
                                                                     // Begin normal game turn
                                                                     let mut card_counts = std::collections::HashMap::new();
@@ -290,6 +295,11 @@ pub async fn handle_connection(
                                                                 sam_announcer: game_state.sam_announcer,
                                                             };
                                                             RoomManager::broadcast_room(&state.session_manager, &room.players, &end_msg);
+                                                             state.room_manager.reset_room_game_state(room_id).await;
+                                                             if let Some(fresh_room) = state.room_manager.get_room(&room_id).await {
+                                                                 let info_msg = ServerMessage::RoomInfo { room: fresh_room.clone() };
+                                                                 RoomManager::broadcast_room(&state.session_manager, &fresh_room.players, &info_msg);
+                                                             }
                                                         } else {
                                                             let mut card_counts = std::collections::HashMap::new();
                                                             for (&p_id, hand) in &game_state.hands {
@@ -554,6 +564,11 @@ async fn handle_player_disconnect(
                                                                             sam_announcer: updated_game_state.sam_announcer,
                                                                         };
                                                                         RoomManager::broadcast_room(&state.session_manager, &updated_room.players, &end_msg);
+                                                                        state.room_manager.reset_room_game_state(room_id).await;
+                                                                        if let Some(fresh_room) = state.room_manager.get_room(&room_id).await {
+                                                                            let info_msg = ServerMessage::RoomInfo { room: fresh_room.clone() };
+                                                                            RoomManager::broadcast_room(&state.session_manager, &fresh_room.players, &info_msg);
+                                                                        }
                                                                     } else {
                                                                         let mut card_counts = std::collections::HashMap::new();
                                                                         for (&p_id, hand) in &updated_game_state.hands {

@@ -100,6 +100,12 @@ impl RoomManager {
         None
     }
 
+    pub async fn reset_room_game_state(&self, room_id: u32) {
+        if let Some(mut room) = self.rooms.get_mut(&room_id) {
+            room.game_state = None;
+        }
+    }
+
     pub async fn add_player_to_room(&self, room_id: u32, player_id: u64) -> usize {
         if let Some(mut room) = self.rooms.get_mut(&room_id) {
             room.players.push(player_id);
