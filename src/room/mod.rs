@@ -17,6 +17,8 @@ pub struct GameState {
     pub passed_players: Vec<u64>,
     pub sam_announcer: Option<u64>,
     pub turn_count: u32,
+    pub is_sam_phase: bool,
+    pub starter: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -32,6 +34,9 @@ pub struct Room {
 
     pub ready_players: Vec<u64>,
     pub game_state: Option<GameState>,
+    pub first_player: Option<u64>,
+    pub player_golds: HashMap<u64, i64>,
+    pub spectators: Vec<u64>,
 }
 
 impl Room {
@@ -47,6 +52,9 @@ impl Room {
             turn_limit: turn_limit.unwrap_or(15),
             ready_players: Vec::new(),
             game_state: None,
+            first_player: None,
+            player_golds: HashMap::new(),
+            spectators: Vec::new(),
         }
     }
 
@@ -58,6 +66,12 @@ impl Room {
         // Only allow changing ready status if game is waiting
         if self.status != RoomStatus::Waiting {
             return;
+        }
+        // Host does not ready up
+        if let Some(&host_id) = self.players.first() {
+            if player_id == host_id {
+                return;
+            }
         }
         if ready {
             if !self.ready_players.contains(&player_id) {
@@ -72,18 +86,47 @@ impl Room {
     // Returns Ok(Some((winner_id, reason))) if someone wins instantly via Toi Trang.
     // Returns Ok(None) if the game starts normally.
     pub fn start_game(&mut self) -> Result<Option<(u64, ToiTrangReason)>, String> {
-        if self.players.len() < 2 {
-            return Err("Cần ít nhất 2 người chơi để bắt đầu!".into());
+        let host_id = self.players.first().copied().ok_or("Không tìm thấy chủ phòng!")?;
+        
+        let ready_other_players: Vec<u64> = self.ready_players.iter()
+            .copied()
+            .filter(|&p| p != host_id)
+            .collect();
+            
+        if ready_other_players.is_empty() {
+            return Err("Cần ít nhất 1 người chơi khác sẵn sàng để bắt đầu!".into());
         }
+
+        // Starter is self.first_player if present and active, else host_id
+        let starter = if let Some(starter_id) = self.first_player {
+            if self.players.contains(&starter_id) && (starter_id == host_id || ready_other_players.contains(&starter_id)) {
+                starter_id
+            } else {
+                host_id
+            }
+        } else {
+            host_id
+        };
 
         // 1. Shuffling deck
         let mut deck: Vec<u8> = (0..52).collect();
         let mut rng = thread_rng();
         deck.shuffle(&mut rng);
 
-        // 2. Deal 10 cards to each player
+        // 2. Deal 10 cards to active players
         let mut hands = HashMap::new();
-        for &player in &self.players {
+        
+        // Host gets cards
+        let mut host_hand = Vec::new();
+        for _ in 0..10 {
+            if let Some(card) = deck.pop() {
+                host_hand.push(card);
+            }
+        }
+        hands.insert(host_id, host_hand);
+        
+        // Ready players get cards
+        for &player in &ready_other_players {
             let mut hand = Vec::new();
             for _ in 0..10 {
                 if let Some(card) = deck.pop() {
@@ -93,13 +136,25 @@ impl Room {
             hands.insert(player, hand);
         }
 
-        // 3. Check for instant wins (Tới Trắng)
-        for &player in &self.players {
+        // Active players in turn order starting from starter
+        let mut active_players_in_order = Vec::new();
+        let pos = self.players.iter().position(|&p| p == starter).unwrap_or(0);
+        for i in 0..self.players.len() {
+            let idx = (pos + i) % self.players.len();
+            let p_id = self.players[idx];
+            if p_id == host_id || ready_other_players.contains(&p_id) {
+                active_players_in_order.push(p_id);
+            }
+        }
+
+        // 3. Check for instant wins (Tới Trắng) in order
+        for &player in &active_players_in_order {
             if let Some(hand) = hands.get(&player) {
                 if let Some(reason) = check_toi_trang(hand) {
                     // Game ended immediately due to Toi Trang
                     self.status = RoomStatus::Waiting;
                     self.ready_players.clear();
+                    self.first_player = Some(player); // Save winner
                     self.game_state = Some(GameState {
                         hands,
                         active_player: player,
@@ -108,23 +163,27 @@ impl Room {
                         passed_players: Vec::new(),
                         sam_announcer: None,
                         turn_count: 0,
+                        is_sam_phase: false,
+                        starter,
                     });
+                    self.update_payouts(player);
                     return Ok(Some((player, reason)));
                 }
             }
         }
 
-        // 4. Start normal game state
-        let owner_or_first = self.players[0];
+        // 4. Start game in Sâm Announce Phase
         self.status = RoomStatus::Playing;
         self.game_state = Some(GameState {
             hands,
-            active_player: owner_or_first,
+            active_player: starter,
             last_played_cards: Vec::new(),
             last_played_by: None,
             passed_players: Vec::new(),
             sam_announcer: None,
             turn_count: 0,
+            is_sam_phase: true,
+            starter,
         });
 
         Ok(None)
@@ -169,10 +228,49 @@ impl Room {
             }
         }
 
-        // Check victory
-        if hand.is_empty() {
+        // Check mid-game block penalties (Tứ quý chặn 2, Tứ quý chồng tiếp x2)
+        if !state.last_played_cards.is_empty() {
+            let last_comb = analyze_combination(&state.last_played_cards);
+            if let Some(victim_id) = state.last_played_by {
+                match (&last_comb, &current_comb) {
+                    (crate::game::CombinationType::Single(15), crate::game::CombinationType::Quad(_)) => {
+                        let penalty = 10 * (self.bet_size as i64);
+                        let victim_gold = self.player_golds.entry(victim_id).or_insert(100000);
+                        *victim_gold = (*victim_gold - penalty).max(0);
+
+                        let blocker_gold = self.player_golds.entry(player_id).or_insert(100000);
+                        *blocker_gold += penalty;
+                    }
+                    (crate::game::CombinationType::Quad(_), crate::game::CombinationType::Quad(_)) => {
+                        let penalty = 20 * (self.bet_size as i64);
+                        let victim_gold = self.player_golds.entry(victim_id).or_insert(100000);
+                        *victim_gold = (*victim_gold - penalty).max(0);
+
+                        let blocker_gold = self.player_golds.entry(player_id).or_insert(100000);
+                        *blocker_gold += penalty;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Check if Sâm announcer is blocked (Sâm fails)
+        if state.sam_announcer.is_some() && !state.last_played_cards.is_empty() {
+            state.last_played_cards = played.to_vec();
+            state.last_played_by = Some(player_id);
+            self.update_payouts(player_id);
             self.status = RoomStatus::Waiting;
             self.ready_players.clear();
+            self.first_player = Some(player_id);
+            return Ok(true); // Blocker wins immediately
+        }
+
+        // Check victory
+        if hand.is_empty() {
+            self.update_payouts(player_id);
+            self.status = RoomStatus::Waiting;
+            self.ready_players.clear();
+            self.first_player = Some(player_id);
             return Ok(true); // Player won, game over
         }
 
@@ -203,6 +301,21 @@ impl Room {
             return Err("Không phải lượt của bạn!".into());
         }
 
+        if state.is_sam_phase {
+            // Sâm Announce Phase pass: move to next player in order
+            let next_player = get_next_player(&self.players, player_id, &[], &state.hands);
+            
+            if next_player == state.starter {
+                // Everyone has passed! End Sâm phase and start normal game with starter's turn
+                state.is_sam_phase = false;
+                state.active_player = state.starter;
+            } else {
+                state.active_player = next_player;
+            }
+            state.turn_count += 1;
+            return Ok(());
+        }
+
         if state.last_played_cards.is_empty() {
             return Err("Bạn đang cầm cái, không được bỏ lượt!".into());
         }
@@ -227,10 +340,76 @@ impl Room {
     // Announce Sâm logic
     pub fn announce_sam(&mut self, player_id: u64) -> Result<(), String> {
         let state = self.game_state.as_mut().ok_or("Trận đấu chưa bắt đầu!")?;
+        if !state.is_sam_phase {
+            return Err("Không phải trong giai đoạn báo Sâm!".into());
+        }
+        if state.active_player != player_id {
+            return Err("Không phải lượt báo Sâm của bạn!".into());
+        }
         state.sam_announcer = Some(player_id);
         state.active_player = player_id;
+        state.is_sam_phase = false; // Phase ends immediately
         state.turn_count += 1;
         Ok(())
+    }
+
+    fn update_payouts(&mut self, winner_id: u64) {
+        let state = match &self.game_state {
+            Some(s) => s,
+            None => return,
+        };
+
+        let bet = self.bet_size as i64;
+        let mut payouts = std::collections::HashMap::new();
+
+        let active_players: Vec<u64> = state.hands.keys().copied().collect();
+        let other_active_count = (active_players.len() as i64) - 1;
+
+        if let Some(announcer_id) = state.sam_announcer {
+            if winner_id == announcer_id {
+                let mut total_win = 0;
+                for &p_id in &active_players {
+                    if p_id != winner_id {
+                        let loss = 20 * bet;
+                        payouts.insert(p_id, -loss);
+                        total_win += loss;
+                    }
+                }
+                payouts.insert(winner_id, total_win);
+            } else {
+                let penalty = 20 * bet * other_active_count;
+                payouts.insert(announcer_id, -penalty);
+                payouts.insert(winner_id, penalty);
+                for &p_id in &active_players {
+                    if p_id != announcer_id && p_id != winner_id {
+                        payouts.insert(p_id, 0);
+                    }
+                }
+            }
+        } else {
+            let mut total_win = 0;
+            for &p_id in &active_players {
+                if p_id != winner_id {
+                    let hand = state.hands.get(&p_id).cloned().unwrap_or_default();
+                    let cards_count = hand.len() as i64;
+                    let heo_count = hand.iter().filter(|&&c| (c / 4) == 12).count() as i64;
+
+                    let loss = if cards_count == 10 {
+                        (15 + heo_count * 5) * bet
+                    } else {
+                        (cards_count + heo_count * 5) * bet
+                    };
+                    payouts.insert(p_id, -loss);
+                    total_win += loss;
+                }
+            }
+            payouts.insert(winner_id, total_win);
+        }
+
+        for (p_id, diff) in payouts {
+            let entry = self.player_golds.entry(p_id).or_insert(100000);
+            *entry = (*entry + diff).max(0);
+        }
     }
 }
 

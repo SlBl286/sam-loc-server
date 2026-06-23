@@ -108,8 +108,18 @@ impl RoomManager {
 
     pub async fn add_player_to_room(&self, room_id: u32, player_id: u64) -> usize {
         if let Some(mut room) = self.rooms.get_mut(&room_id) {
-            room.players.push(player_id);
-            return room.players.len() - 1;
+            room.player_golds.entry(player_id).or_insert(100000);
+            if room.players.len() >= room.max_players as usize {
+                if !room.spectators.contains(&player_id) {
+                    room.spectators.push(player_id);
+                }
+                return 999;
+            } else {
+                if !room.players.contains(&player_id) {
+                    room.players.push(player_id);
+                }
+                return room.players.len() - 1;
+            }
         }
         0
     }
@@ -121,10 +131,16 @@ impl RoomManager {
     pub async fn remove_player_from_room(&self, room_id: u32, player_id: u64) {
         let mut remove_room = false;
         if let Some(mut room) = self.rooms.get_mut(&room_id) {
+            let was_player = room.players.contains(&player_id);
             room.players.retain(|s| *s != player_id);
+            room.spectators.retain(|s| *s != player_id);
+            room.ready_players.retain(|s| *s != player_id);
 
             if room.players.is_empty() {
                 remove_room = true;
+            } else if was_player && room.players.len() < room.max_players as usize && !room.spectators.is_empty() {
+                let next_player = room.spectators.remove(0);
+                room.players.push(next_player);
             }
         }
         if remove_room {
@@ -133,10 +149,12 @@ impl RoomManager {
     }
     pub fn broadcast_room(
         session_manager: &SessionManager,
-        players: &[u64],
+        room: &Room,
         msg: &impl serde::Serialize,
     ) {
+        let mut targets = room.players.clone();
+        targets.extend(&room.spectators);
         let text = serde_json::to_string(msg).unwrap();
-        session_manager.broadcast(players, Message::Text(text.into()));
+        session_manager.broadcast(&targets, Message::Text(text.into()));
     }
 }

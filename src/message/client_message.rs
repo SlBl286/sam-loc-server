@@ -18,6 +18,7 @@ pub enum ClientMessage {
 
   PlayCards { cards: Vec<u8>},
   Ready,
+  StartGame,
   Unready,
   PassTurn,
   AnnounceSam,

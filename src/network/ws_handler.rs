@@ -118,7 +118,7 @@ pub async fn handle_connection(
 
                                     if let Some(room) = state.room_manager.get_room(&room_id).await {
                                         let info_msg = ServerMessage::RoomInfo { room: room.clone() };
-                                        RoomManager::broadcast_room(&state.session_manager, &room.players, &info_msg);
+                                        RoomManager::broadcast_room(&state.session_manager, &room, &info_msg);
                                     }
 
                                     ServerMessage::PlayerJoinedRoom {
@@ -150,7 +150,7 @@ pub async fn handle_connection(
 
                                     if let Some(room) = state.room_manager.get_room(&room_id).await {
                                         let info_msg = ServerMessage::RoomInfo { room: room.clone() };
-                                        RoomManager::broadcast_room(&state.session_manager, &room.players, &info_msg);
+                                        RoomManager::broadcast_room(&state.session_manager, &room, &info_msg);
                                     }
 
                                     ServerMessage::PlayerJoinedRoom {
@@ -182,7 +182,7 @@ pub async fn handle_connection(
 
                                     if let Some(room) = state.room_manager.get_room(&room_id).await {
                                         let info_msg = ServerMessage::RoomInfo { room: room.clone() };
-                                        RoomManager::broadcast_room(&state.session_manager, &room.players, &info_msg);
+                                        RoomManager::broadcast_room(&state.session_manager, &room, &info_msg);
                                     }
 
                                     ServerMessage::PlayerLeftRoom {
@@ -199,17 +199,27 @@ pub async fn handle_connection(
                                 if let (Some(player_id), Some(room_id)) = (ctx.player_id, ctx.room_id) {
                                     if let Some(room) = state.room_manager.set_player_ready(room_id, player_id, true).await {
                                         let info_msg = ServerMessage::RoomInfo { room: room.clone() };
-                                        RoomManager::broadcast_room(&state.session_manager, &room.players, &info_msg);
-
-                                        // Start game if everyone is ready and players count >= 2
-                                        if room.ready_players.len() == room.players.len() && room.players.len() >= 2 {
+                                        RoomManager::broadcast_room(&state.session_manager, &room, &info_msg);
+                                    }
+                                }
+                                ServerMessage::PlayerReadyUpdated { user_id: ctx.player_id.unwrap_or(0), ready: true }
+                            }
+                            Ok(ClientMessage::StartGame) => {
+                                if let (Some(player_id), Some(room_id)) = (ctx.player_id, ctx.room_id) {
+                                    if let Some(room) = state.room_manager.get_room(&room_id).await {
+                                        let is_host = room.players.first() == Some(&player_id);
+                                        if !is_host {
+                                            let err_msg = ServerMessage::Error { message: "Chỉ chủ phòng mới có quyền bắt đầu!".to_string() };
+                                            let json = serde_json::to_string(&err_msg).unwrap();
+                                            let _ = tx.send(Message::Text(json.into()));
+                                        } else {
                                             if let Some(start_res) = state.room_manager.start_room_game(room_id).await {
                                                 match start_res {
                                                     Ok(toi_trang_opt) => {
                                                         if let Some(updated_room) = state.room_manager.get_room(&room_id).await {
                                                             if let Some(game_state) = &updated_room.game_state {
                                                                 let playing_info_msg = ServerMessage::RoomInfo { room: updated_room.clone() };
-                                                                RoomManager::broadcast_room(&state.session_manager, &updated_room.players, &playing_info_msg);
+                                                                RoomManager::broadcast_room(&state.session_manager, &updated_room, &playing_info_msg);
 
                                                                 // Send private hands
                                                                 for &p_id in &updated_room.players {
@@ -228,11 +238,11 @@ pub async fn handle_connection(
                                                                         hands: game_state.hands.clone(),
                                                                         sam_announcer: game_state.sam_announcer,
                                                                     };
-                                                                    RoomManager::broadcast_room(&state.session_manager, &updated_room.players, &end_msg);
+                                                                    RoomManager::broadcast_room(&state.session_manager, &updated_room, &end_msg);
                                                                     state.room_manager.reset_room_game_state(room_id).await;
                                                                     if let Some(fresh_room) = state.room_manager.get_room(&room_id).await {
                                                                         let info_msg = ServerMessage::RoomInfo { room: fresh_room.clone() };
-                                                                        RoomManager::broadcast_room(&state.session_manager, &fresh_room.players, &info_msg);
+                                                                        RoomManager::broadcast_room(&state.session_manager, &fresh_room, &info_msg);
                                                                     }
                                                                 } else {
                                                                     // Begin normal game turn
@@ -246,8 +256,10 @@ pub async fn handle_connection(
                                                                         last_played_by: None,
                                                                         player_card_counts: card_counts,
                                                                         passed_players: Vec::new(),
+                                                                        is_sam_phase: game_state.is_sam_phase,
+                                                                        player_golds: updated_room.player_golds.clone(),
                                                                     };
-                                                                    RoomManager::broadcast_room(&state.session_manager, &updated_room.players, &turn_msg);
+                                                                    RoomManager::broadcast_room(&state.session_manager, &updated_room, &turn_msg);
 
                                                                     // Start countdown timer for first player
                                                                     start_turn_timer(
@@ -262,20 +274,22 @@ pub async fn handle_connection(
                                                         }
                                                     }
                                                     Err(e) => {
-                                                        RoomManager::broadcast_room(&state.session_manager, &room.players, &ServerMessage::Error { message: e });
+                                                        let err_msg = ServerMessage::Error { message: e };
+                                                        let json = serde_json::to_string(&err_msg).unwrap();
+                                                        let _ = tx.send(Message::Text(json.into()));
                                                     }
                                                 }
                                             }
                                         }
                                     }
                                 }
-                                ServerMessage::PlayerReadyUpdated { user_id: ctx.player_id.unwrap_or(0), ready: true }
+                                ServerMessage::Error { message: "StartGame processed".into() }
                             }
                             Ok(ClientMessage::Unready) => {
                                 if let (Some(player_id), Some(room_id)) = (ctx.player_id, ctx.room_id) {
                                     if let Some(room) = state.room_manager.set_player_ready(room_id, player_id, false).await {
                                         let info_msg = ServerMessage::RoomInfo { room: room.clone() };
-                                        RoomManager::broadcast_room(&state.session_manager, &room.players, &info_msg);
+                                        RoomManager::broadcast_room(&state.session_manager, &room, &info_msg);
                                     }
                                 }
                                 ServerMessage::PlayerReadyUpdated { user_id: ctx.player_id.unwrap_or(0), ready: false }
@@ -288,17 +302,26 @@ pub async fn handle_connection(
                                                 if let Some(room) = state.room_manager.get_room(&room_id).await {
                                                     if let Some(game_state) = &room.game_state {
                                                         if game_ended {
+                                                            let reason = if let Some(announcer) = game_state.sam_announcer {
+                                                                if player_id == announcer {
+                                                                    "Báo Sâm thành công".to_string()
+                                                                } else {
+                                                                    "Chặn sâm thành công".to_string()
+                                                                }
+                                                            } else {
+                                                                "Đã đánh hết bài".to_string()
+                                                            };
                                                             let end_msg = ServerMessage::GameEnded {
                                                                 winner_id: player_id,
-                                                                reason: "Đã đánh hết bài".to_string(),
+                                                                reason,
                                                                 hands: game_state.hands.clone(),
                                                                 sam_announcer: game_state.sam_announcer,
                                                             };
-                                                            RoomManager::broadcast_room(&state.session_manager, &room.players, &end_msg);
+                                                            RoomManager::broadcast_room(&state.session_manager, &room, &end_msg);
                                                              state.room_manager.reset_room_game_state(room_id).await;
                                                              if let Some(fresh_room) = state.room_manager.get_room(&room_id).await {
                                                                  let info_msg = ServerMessage::RoomInfo { room: fresh_room.clone() };
-                                                                 RoomManager::broadcast_room(&state.session_manager, &fresh_room.players, &info_msg);
+                                                                 RoomManager::broadcast_room(&state.session_manager, &fresh_room, &info_msg);
                                                              }
                                                         } else {
                                                             let mut card_counts = std::collections::HashMap::new();
@@ -311,8 +334,10 @@ pub async fn handle_connection(
                                                                 last_played_by: Some(player_id),
                                                                 player_card_counts: card_counts,
                                                                 passed_players: game_state.passed_players.clone(),
+                                                                is_sam_phase: game_state.is_sam_phase,
+                                                                player_golds: room.player_golds.clone(),
                                                             };
-                                                            RoomManager::broadcast_room(&state.session_manager, &room.players, &turn_msg);
+                                                            RoomManager::broadcast_room(&state.session_manager, &room, &turn_msg);
 
                                                             start_turn_timer(
                                                                 state.clone(),
@@ -352,8 +377,10 @@ pub async fn handle_connection(
                                                             last_played_by: game_state.last_played_by,
                                                             player_card_counts: card_counts,
                                                             passed_players: game_state.passed_players.clone(),
+                                                            is_sam_phase: game_state.is_sam_phase,
+                                                            player_golds: room.player_golds.clone(),
                                                         };
-                                                        RoomManager::broadcast_room(&state.session_manager, &room.players, &turn_msg);
+                                                        RoomManager::broadcast_room(&state.session_manager, &room, &turn_msg);
                                                     }
                                                 }
                                             }
@@ -375,7 +402,7 @@ pub async fn handle_connection(
                                                 if let Some(room) = state.room_manager.get_room(&room_id).await {
                                                     if let Some(game_state) = &room.game_state {
                                                         let sam_msg = ServerMessage::SamAnnounced { player_id };
-                                                        RoomManager::broadcast_room(&state.session_manager, &room.players, &sam_msg);
+                                                        RoomManager::broadcast_room(&state.session_manager, &room, &sam_msg);
 
                                                         let mut card_counts = std::collections::HashMap::new();
                                                         for (&p_id, hand) in &game_state.hands {
@@ -387,8 +414,10 @@ pub async fn handle_connection(
                                                             last_played_by: game_state.last_played_by,
                                                             player_card_counts: card_counts,
                                                             passed_players: game_state.passed_players.clone(),
+                                                            is_sam_phase: game_state.is_sam_phase,
+                                                            player_golds: room.player_golds.clone(),
                                                         };
-                                                        RoomManager::broadcast_room(&state.session_manager, &room.players, &turn_msg);
+                                                        RoomManager::broadcast_room(&state.session_manager, &room, &turn_msg);
                                                     }
                                                 }
                                             }
@@ -480,7 +509,7 @@ async fn handle_player_disconnect(
         // Broadcast RoomInfo to remaining players
                                         if let Some(room) = state.room_manager.get_room(&rid).await {
                                             let info_msg = ServerMessage::RoomInfo { room: room.clone() };
-                                            RoomManager::broadcast_room(&state.session_manager, &room.players, &info_msg);
+                                            RoomManager::broadcast_room(&state.session_manager, &room, &info_msg);
                                         }
                                     }
                                     state.session_manager.remove_session(player_id);
@@ -503,7 +532,8 @@ async fn handle_player_disconnect(
                                                     if game_state.active_player == player_id && game_state.turn_count == expected_turn_count {
                                                         println!("Room {} Player {} turn timed out!", room_id, player_id);
 
-                                                        let auto_play_cards = game_state.last_played_cards.is_empty();
+                                                        let is_sam = if let Some(g_state) = &room.game_state { g_state.is_sam_phase } else { false };
+                                                        let auto_play_cards = game_state.last_played_cards.is_empty() && !is_sam;
                                                         let mut auto_cards = Vec::new();
 
                                                         if auto_play_cards {
@@ -563,11 +593,11 @@ async fn handle_player_disconnect(
                                                                             hands: updated_game_state.hands.clone(),
                                                                             sam_announcer: updated_game_state.sam_announcer,
                                                                         };
-                                                                        RoomManager::broadcast_room(&state.session_manager, &updated_room.players, &end_msg);
+                                                                        RoomManager::broadcast_room(&state.session_manager, &updated_room, &end_msg);
                                                                         state.room_manager.reset_room_game_state(room_id).await;
                                                                         if let Some(fresh_room) = state.room_manager.get_room(&room_id).await {
                                                                             let info_msg = ServerMessage::RoomInfo { room: fresh_room.clone() };
-                                                                            RoomManager::broadcast_room(&state.session_manager, &fresh_room.players, &info_msg);
+                                                                            RoomManager::broadcast_room(&state.session_manager, &fresh_room, &info_msg);
                                                                         }
                                                                     } else {
                                                                         let mut card_counts = std::collections::HashMap::new();
@@ -581,8 +611,10 @@ async fn handle_player_disconnect(
                                                                             last_played_by: if auto_play_cards { Some(player_id) } else { updated_game_state.last_played_by },
                                                                             player_card_counts: card_counts,
                                                                             passed_players: updated_game_state.passed_players.clone(),
+                                                                            is_sam_phase: updated_game_state.is_sam_phase,
+                                                                            player_golds: updated_room.player_golds.clone(),
                                                                         };
-                                                                        RoomManager::broadcast_room(&state.session_manager, &updated_room.players, &turn_msg);
+                                                                        RoomManager::broadcast_room(&state.session_manager, &updated_room, &turn_msg);
 
                                                                         start_turn_timer(
                                                                             state.clone(),
