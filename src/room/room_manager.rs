@@ -4,6 +4,14 @@ use dashmap::DashMap;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::{player::session_manager::SessionManager, room::Room};
+use super::get_next_player;
+
+#[derive(Debug)]
+pub struct LeaveRoomResult {
+    pub room_deleted: bool,
+    pub game_ended: Option<(u64, String, std::collections::HashMap<u64, Vec<u8>>, Option<u64>)>, // (winner_id, reason, hands, sam_announcer)
+    pub turn_updated: Option<(u64, u32)>, // (next_active_player, next_turn_count)
+}
 
 pub struct RoomManager {
     rooms: DashMap<u32, Room>,
@@ -86,16 +94,23 @@ impl RoomManager {
         None
     }
 
-    pub async fn pass_room_turn(&self, room_id: u32, player_id: u64) -> Option<Result<(), String>> {
+    pub async fn pass_room_turn(&self, room_id: u32, player_id: u64) -> Option<Result<bool, String>> {
         if let Some(mut room) = self.rooms.get_mut(&room_id) {
             return Some(room.pass_turn(player_id));
         }
         None
     }
 
-    pub async fn announce_room_sam(&self, room_id: u32, player_id: u64) -> Option<Result<(), String>> {
+    pub async fn announce_room_sam(&self, room_id: u32, player_id: u64) -> Option<Result<bool, String>> {
         if let Some(mut room) = self.rooms.get_mut(&room_id) {
             return Some(room.announce_sam(player_id));
+        }
+        None
+    }
+
+    pub async fn force_resolve_room_sam(&self, room_id: u32) -> Option<Result<(), String>> {
+        if let Some(mut room) = self.rooms.get_mut(&room_id) {
+            return Some(room.force_resolve_sam());
         }
         None
     }
@@ -128,23 +143,126 @@ impl RoomManager {
         self.rooms.remove(&room_id);
         println!("Removed room {}", room_id);
     }
-    pub async fn remove_player_from_room(&self, room_id: u32, player_id: u64) {
-        let mut remove_room = false;
+    pub async fn remove_player_from_room(&self, room_id: u32, player_id: u64) -> LeaveRoomResult {
+        let mut room_deleted = false;
+        let mut game_ended = None;
+        let mut turn_updated = None;
+
         if let Some(mut room) = self.rooms.get_mut(&room_id) {
             let was_player = room.players.contains(&player_id);
             room.players.retain(|s| *s != player_id);
             room.spectators.retain(|s| *s != player_id);
             room.ready_players.retain(|s| *s != player_id);
 
+            // Mid-game escape logic
+            let mut escape_handled = false;
+            let mut loss = 0;
+            let mut remaining_active = Vec::new();
+            let mut state_sam_announcer = None;
+            let mut state_hands = std::collections::HashMap::new();
+
+            if room.status == crate::room::room_status::RoomStatus::Playing {
+                let bet = room.bet_size as i64;
+                let room_players = room.players.clone();
+                if let Some(state) = room.game_state.as_mut() {
+                    if state.hands.contains_key(&player_id) {
+                        loss = if state.sam_announcer.is_some() {
+                            20 * bet
+                        } else {
+                            15 * bet
+                        };
+                        state_sam_announcer = state.sam_announcer;
+                        
+                        // Remove from active hands
+                        state.hands.remove(&player_id);
+
+                        // Remaining active players who are still in the room
+                        remaining_active = state.hands.keys()
+                            .copied()
+                            .filter(|p| room_players.contains(p))
+                            .collect();
+
+                        state_hands = state.hands.clone();
+                        escape_handled = true;
+                    }
+                }
+            }
+
+            if escape_handled {
+                // Deduct gold from escaping player
+                let entry = room.player_golds.entry(player_id).or_insert(100000);
+                *entry = (*entry - loss).max(0);
+
+                let room_players = room.players.clone();
+
+                if remaining_active.len() <= 1 {
+                    // Game ends immediately
+                    room.status = crate::room::room_status::RoomStatus::Waiting;
+                    room.ready_players.clear();
+
+                    if let Some(&winner_id) = remaining_active.first() {
+                        // Credit the winner
+                        let win_entry = room.player_golds.entry(winner_id).or_insert(100000);
+                        *win_entry += loss;
+
+                        game_ended = Some((
+                            winner_id,
+                            "Đối thủ thoát - Bạn thắng cuộc!".to_string(),
+                            state_hands,
+                            state_sam_announcer,
+                        ));
+                    } else {
+                        game_ended = Some((
+                            0,
+                            "Không còn người chơi trong ván".to_string(),
+                            state_hands,
+                            state_sam_announcer,
+                        ));
+                    }
+                    room.game_state = None;
+                } else {
+                    // Game continues. Split the penalty among remaining active players.
+                    let split_win = loss / (remaining_active.len() as i64);
+                    for &w_id in &remaining_active {
+                        let w_entry = room.player_golds.entry(w_id).or_insert(100000);
+                        *w_entry += split_win;
+                    }
+
+                    // If it was their turn, move to the next player
+                    if let Some(state) = room.game_state.as_mut() {
+                        if state.active_player == player_id {
+                            let next_player = get_next_player(&room_players, player_id, &state.passed_players, &state.hands);
+                            state.active_player = next_player;
+
+                            if Some(next_player) == state.last_played_by {
+                                state.last_played_cards.clear();
+                                state.last_played_by = None;
+                                state.passed_players.clear();
+                            }
+
+                            state.turn_count += 1;
+                            turn_updated = Some((state.active_player, state.turn_count));
+                        }
+                    }
+                }
+            }
+
             if room.players.is_empty() {
-                remove_room = true;
+                room_deleted = true;
             } else if was_player && room.players.len() < room.max_players as usize && !room.spectators.is_empty() {
                 let next_player = room.spectators.remove(0);
                 room.players.push(next_player);
             }
         }
-        if remove_room {
+
+        if room_deleted {
             self.remove_room(room_id);
+        }
+
+        LeaveRoomResult {
+            room_deleted,
+            game_ended,
+            turn_updated,
         }
     }
     pub fn broadcast_room(

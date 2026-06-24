@@ -25,6 +25,7 @@ pub enum ServerMessage {
         passed_players: Vec<u64>,
         is_sam_phase: bool,
         player_golds: std::collections::HashMap<u64, i64>,
+        sam_choices: std::collections::HashMap<u64, bool>,
     },
     SamAnnounced { player_id: u64 },
     GameEnded { 

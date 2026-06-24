@@ -19,6 +19,7 @@ pub struct GameState {
     pub turn_count: u32,
     pub is_sam_phase: bool,
     pub starter: u64,
+    pub sam_choices: HashMap<u64, bool>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -165,6 +166,7 @@ impl Room {
                         turn_count: 0,
                         is_sam_phase: false,
                         starter,
+                        sam_choices: HashMap::new(),
                     });
                     self.update_payouts(player);
                     return Ok(Some((player, reason)));
@@ -184,6 +186,7 @@ impl Room {
             turn_count: 0,
             is_sam_phase: true,
             starter,
+            sam_choices: HashMap::new(),
         });
 
         Ok(None)
@@ -205,6 +208,16 @@ impl Room {
             if !hand.contains(&c) {
                 return Err("Quân bài không hợp lệ hoặc không có trên tay!".into());
             }
+        }
+
+        // Rule: cannot play 2 as the last card/combination
+        if played.len() == hand.len() && played.iter().any(|&c| crate::game::get_rank(c) == 12) {
+            return Err("Không được đánh 2 cuối cùng!".into());
+        }
+
+        // Rule: if player has only 2s left, they can only pass
+        if hand.iter().all(|&c| crate::game::get_rank(c) == 12) {
+            return Err("Bạn chỉ còn 2, chỉ được bỏ lượt!".into());
         }
 
         // Analyze played combination
@@ -294,30 +307,36 @@ impl Room {
     }
 
     // Pass turn logic.
-    pub fn pass_turn(&mut self, player_id: u64) -> Result<(), String> {
+    pub fn pass_turn(&mut self, player_id: u64) -> Result<bool, String> {
         let state = self.game_state.as_mut().ok_or("Trận đấu chưa bắt đầu!")?;
+
+        if state.is_sam_phase {
+            if !state.hands.contains_key(&player_id) {
+                return Err("Bạn không phải người chơi trong ván này!".into());
+            }
+            // Record choice
+            state.sam_choices.insert(player_id, false);
+
+            // Check if all players have chosen
+            let all_chosen = state.sam_choices.len() == state.hands.len();
+            if all_chosen {
+                self.resolve_sam_phase();
+                return Ok(true); // Sâm phase ended
+            } else {
+                return Ok(false); // Sâm phase continues
+            }
+        }
 
         if state.active_player != player_id {
             return Err("Không phải lượt của bạn!".into());
         }
 
-        if state.is_sam_phase {
-            // Sâm Announce Phase pass: move to next player in order
-            let next_player = get_next_player(&self.players, player_id, &[], &state.hands);
-            
-            if next_player == state.starter {
-                // Everyone has passed! End Sâm phase and start normal game with starter's turn
-                state.is_sam_phase = false;
-                state.active_player = state.starter;
-            } else {
-                state.active_player = next_player;
-            }
-            state.turn_count += 1;
-            return Ok(());
-        }
-
         if state.last_played_cards.is_empty() {
-            return Err("Bạn đang cầm cái, không được bỏ lượt!".into());
+            let hand = state.hands.get(&player_id).ok_or("Không tìm thấy bài người chơi!")?;
+            let only_twos = !hand.is_empty() && hand.iter().all(|&c| crate::game::get_rank(c) == 12);
+            if !only_twos {
+                return Err("Bạn đang cầm cái, không được bỏ lượt!".into());
+            }
         }
 
         if !state.passed_players.contains(&player_id) {
@@ -334,22 +353,90 @@ impl Room {
 
         state.active_player = next_player;
         state.turn_count += 1;
-        Ok(())
+        Ok(false)
     }
 
     // Announce Sâm logic
-    pub fn announce_sam(&mut self, player_id: u64) -> Result<(), String> {
+    pub fn announce_sam(&mut self, player_id: u64) -> Result<bool, String> {
         let state = self.game_state.as_mut().ok_or("Trận đấu chưa bắt đầu!")?;
         if !state.is_sam_phase {
             return Err("Không phải trong giai đoạn báo Sâm!".into());
         }
-        if state.active_player != player_id {
-            return Err("Không phải lượt báo Sâm của bạn!".into());
+        if !state.hands.contains_key(&player_id) {
+            return Err("Bạn không phải người chơi trong ván này!".into());
         }
-        state.sam_announcer = Some(player_id);
-        state.active_player = player_id;
-        state.is_sam_phase = false; // Phase ends immediately
+
+        // Record choice
+        state.sam_choices.insert(player_id, true);
+
+        // Check if all players have chosen
+        let all_chosen = state.sam_choices.len() == state.hands.len();
+        if all_chosen {
+            self.resolve_sam_phase();
+            Ok(true) // Sâm phase ended
+        } else {
+            Ok(false) // Sâm phase continues
+        }
+    }
+
+    // Resolves choices at the end of Sâm phase
+    pub fn resolve_sam_phase(&mut self) {
+        let state = match self.game_state.as_mut() {
+            Some(s) => s,
+            None => return,
+        };
+
+        if !state.is_sam_phase {
+            return;
+        }
+
+        // Active players in turn order starting from starter
+        let mut active_players_in_order = Vec::new();
+        let pos = self.players.iter().position(|&p| p == state.starter).unwrap_or(0);
+        for i in 0..self.players.len() {
+            let idx = (pos + i) % self.players.len();
+            let p_id = self.players[idx];
+            if state.hands.contains_key(&p_id) {
+                active_players_in_order.push(p_id);
+            }
+        }
+
+        // Find the first player in order who chose to announce Sam
+        let mut sam_player = None;
+        for &p_id in &active_players_in_order {
+            if let Some(&chose_sam) = state.sam_choices.get(&p_id) {
+                if chose_sam {
+                    sam_player = Some(p_id);
+                    break;
+                }
+            }
+        }
+
+        if let Some(p_id) = sam_player {
+            state.sam_announcer = Some(p_id);
+            state.active_player = p_id;
+        } else {
+            state.sam_announcer = None;
+            state.active_player = state.starter;
+        }
+
+        state.is_sam_phase = false;
         state.turn_count += 1;
+    }
+
+    pub fn force_resolve_sam(&mut self) -> Result<(), String> {
+        let state = self.game_state.as_mut().ok_or("Trận đấu chưa bắt đầu!")?;
+        if !state.is_sam_phase {
+            return Err("Không phải trong giai đoạn báo Sâm!".into());
+        }
+
+        // For any player who hasn't chosen, default to false
+        let players: Vec<u64> = state.hands.keys().copied().collect();
+        for p_id in players {
+            state.sam_choices.entry(p_id).or_insert(false);
+        }
+
+        self.resolve_sam_phase();
         Ok(())
     }
 
@@ -413,7 +500,7 @@ impl Room {
     }
 }
 
-fn get_next_player(
+pub(crate) fn get_next_player(
     players: &[u64],
     current: u64,
     passed: &[u64],

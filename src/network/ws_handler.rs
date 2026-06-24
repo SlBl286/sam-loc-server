@@ -166,7 +166,7 @@ pub async fn handle_connection(
                             }
                             Ok(ClientMessage::LeaveRoom { room_id }) => {
                                 if let Some(player_id) = ctx.player_id {
-                                    state
+                                    let leave_res = state
                                         .room_manager
                                         .remove_player_from_room(room_id, player_id)
                                         .await;
@@ -180,9 +180,50 @@ pub async fn handle_connection(
                                         .session_manager
                                         .broadcast_all(Message::Text(json.into()));
 
-                                    if let Some(room) = state.room_manager.get_room(&room_id).await {
-                                        let info_msg = ServerMessage::RoomInfo { room: room.clone() };
-                                        RoomManager::broadcast_room(&state.session_manager, &room, &info_msg);
+                                    if !leave_res.room_deleted {
+                                        if let Some(room) = state.room_manager.get_room(&room_id).await {
+                                            if let Some((winner_id, reason, hands, sam_announcer)) = leave_res.game_ended {
+                                                let end_msg = ServerMessage::GameEnded {
+                                                    winner_id,
+                                                    reason,
+                                                    hands,
+                                                    sam_announcer,
+                                                };
+                                                RoomManager::broadcast_room(&state.session_manager, &room, &end_msg);
+                                            } else if let Some((next_active, next_turn)) = leave_res.turn_updated {
+                                                let mut card_counts = std::collections::HashMap::new();
+                                                if let Some(game_state) = &room.game_state {
+                                                    for (&p_id, hand) in &game_state.hands {
+                                                        card_counts.insert(p_id, hand.len());
+                                                    }
+                                                    let turn_msg = ServerMessage::TurnUpdated {
+                                                        active_player_id: next_active,
+                                                        last_played_cards: game_state.last_played_cards.clone(),
+                                                        last_played_by: game_state.last_played_by,
+                                                        player_card_counts: card_counts,
+                                                        passed_players: game_state.passed_players.clone(),
+                                                        is_sam_phase: game_state.is_sam_phase,
+                                                        player_golds: room.player_golds.clone(),
+                                                        sam_choices: game_state.sam_choices.clone(),
+                                                    };
+                                                    RoomManager::broadcast_room(&state.session_manager, &room, &turn_msg);
+
+                                                    start_turn_timer(
+                                                        state.clone(),
+                                                        room_id,
+                                                        next_active,
+                                                        next_turn,
+                                                        room.turn_limit,
+                                                    );
+                                                }
+                                            }
+
+                                            // Re-fetch and broadcast updated RoomInfo
+                                            if let Some(updated_room) = state.room_manager.get_room(&room_id).await {
+                                                let info_msg = ServerMessage::RoomInfo { room: updated_room.clone() };
+                                                RoomManager::broadcast_room(&state.session_manager, &updated_room, &info_msg);
+                                            }
+                                        }
                                     }
 
                                     ServerMessage::PlayerLeftRoom {
@@ -258,6 +299,7 @@ pub async fn handle_connection(
                                                                         passed_players: Vec::new(),
                                                                         is_sam_phase: game_state.is_sam_phase,
                                                                         player_golds: updated_room.player_golds.clone(),
+                                                                        sam_choices: game_state.sam_choices.clone(),
                                                                     };
                                                                     RoomManager::broadcast_room(&state.session_manager, &updated_room, &turn_msg);
 
@@ -336,6 +378,7 @@ pub async fn handle_connection(
                                                                 passed_players: game_state.passed_players.clone(),
                                                                 is_sam_phase: game_state.is_sam_phase,
                                                                 player_golds: room.player_golds.clone(),
+                                                                 sam_choices: game_state.sam_choices.clone(),
                                                             };
                                                             RoomManager::broadcast_room(&state.session_manager, &room, &turn_msg);
 
@@ -364,9 +407,16 @@ pub async fn handle_connection(
                                 if let (Some(player_id), Some(room_id)) = (ctx.player_id, ctx.room_id) {
                                     if let Some(pass_res) = state.room_manager.pass_room_turn(room_id, player_id).await {
                                         match pass_res {
-                                            Ok(_) => {
+                                            Ok(sam_phase_ended) => {
                                                 if let Some(room) = state.room_manager.get_room(&room_id).await {
                                                     if let Some(game_state) = &room.game_state {
+                                                        if sam_phase_ended {
+                                                            if let Some(announcer) = game_state.sam_announcer {
+                                                                let sam_msg = ServerMessage::SamAnnounced { player_id: announcer };
+                                                                RoomManager::broadcast_room(&state.session_manager, &room, &sam_msg);
+                                                            }
+                                                        }
+
                                                         let mut card_counts = std::collections::HashMap::new();
                                                         for (&p_id, hand) in &game_state.hands {
                                                             card_counts.insert(p_id, hand.len());
@@ -379,8 +429,19 @@ pub async fn handle_connection(
                                                             passed_players: game_state.passed_players.clone(),
                                                             is_sam_phase: game_state.is_sam_phase,
                                                             player_golds: room.player_golds.clone(),
+                                                            sam_choices: game_state.sam_choices.clone(),
                                                         };
                                                         RoomManager::broadcast_room(&state.session_manager, &room, &turn_msg);
+
+                                                        if sam_phase_ended {
+                                                            start_turn_timer(
+                                                                state.clone(),
+                                                                room_id,
+                                                                game_state.active_player,
+                                                                game_state.turn_count,
+                                                                room.turn_limit,
+                                                            );
+                                                        }
                                                     }
                                                 }
                                             }
@@ -398,11 +459,15 @@ pub async fn handle_connection(
                                 if let (Some(player_id), Some(room_id)) = (ctx.player_id, ctx.room_id) {
                                     if let Some(sam_res) = state.room_manager.announce_room_sam(room_id, player_id).await {
                                         match sam_res {
-                                            Ok(_) => {
+                                            Ok(sam_phase_ended) => {
                                                 if let Some(room) = state.room_manager.get_room(&room_id).await {
                                                     if let Some(game_state) = &room.game_state {
-                                                        let sam_msg = ServerMessage::SamAnnounced { player_id };
-                                                        RoomManager::broadcast_room(&state.session_manager, &room, &sam_msg);
+                                                        if sam_phase_ended {
+                                                            if let Some(announcer) = game_state.sam_announcer {
+                                                                let sam_msg = ServerMessage::SamAnnounced { player_id: announcer };
+                                                                RoomManager::broadcast_room(&state.session_manager, &room, &sam_msg);
+                                                            }
+                                                        }
 
                                                         let mut card_counts = std::collections::HashMap::new();
                                                         for (&p_id, hand) in &game_state.hands {
@@ -416,8 +481,19 @@ pub async fn handle_connection(
                                                             passed_players: game_state.passed_players.clone(),
                                                             is_sam_phase: game_state.is_sam_phase,
                                                             player_golds: room.player_golds.clone(),
+                                                            sam_choices: game_state.sam_choices.clone(),
                                                         };
                                                         RoomManager::broadcast_room(&state.session_manager, &room, &turn_msg);
+
+                                                        if sam_phase_ended {
+                                                            start_turn_timer(
+                                                                state.clone(),
+                                                                room_id,
+                                                                game_state.active_player,
+                                                                game_state.turn_count,
+                                                                room.turn_limit,
+                                                            );
+                                                        }
                                                     }
                                                 }
                                             }
@@ -498,7 +574,7 @@ async fn handle_player_disconnect(
     room_id: Option<u32>,
 ) {
     if let Some(rid) = room_id {
-        state.room_manager.remove_player_from_room(rid, player_id).await;
+        let leave_res = state.room_manager.remove_player_from_room(rid, player_id).await;
         
         // Broadcast RoomList to lobby
         let rooms = state.room_manager.get_rooms().await;
@@ -506,14 +582,54 @@ async fn handle_player_disconnect(
         let json = serde_json::to_string(&list_msg).unwrap();
         state.session_manager.broadcast_all(Message::Text(json.into()));
 
-        // Broadcast RoomInfo to remaining players
-                                        if let Some(room) = state.room_manager.get_room(&rid).await {
-                                            let info_msg = ServerMessage::RoomInfo { room: room.clone() };
-                                            RoomManager::broadcast_room(&state.session_manager, &room, &info_msg);
-                                        }
-                                    }
-                                    state.session_manager.remove_session(player_id);
-                                }
+        if !leave_res.room_deleted {
+            if let Some(room) = state.room_manager.get_room(&rid).await {
+                if let Some((winner_id, reason, hands, sam_announcer)) = leave_res.game_ended {
+                    let end_msg = ServerMessage::GameEnded {
+                        winner_id,
+                        reason,
+                        hands,
+                        sam_announcer,
+                    };
+                    RoomManager::broadcast_room(&state.session_manager, &room, &end_msg);
+                } else if let Some((next_active, next_turn)) = leave_res.turn_updated {
+                    let mut card_counts = std::collections::HashMap::new();
+                    if let Some(game_state) = &room.game_state {
+                        for (&p_id, hand) in &game_state.hands {
+                            card_counts.insert(p_id, hand.len());
+                        }
+                        let turn_msg = ServerMessage::TurnUpdated {
+                            active_player_id: next_active,
+                            last_played_cards: game_state.last_played_cards.clone(),
+                            last_played_by: game_state.last_played_by,
+                            player_card_counts: card_counts,
+                            passed_players: game_state.passed_players.clone(),
+                            is_sam_phase: game_state.is_sam_phase,
+                            player_golds: room.player_golds.clone(),
+                            sam_choices: game_state.sam_choices.clone(),
+                        };
+                        RoomManager::broadcast_room(&state.session_manager, &room, &turn_msg);
+
+                        start_turn_timer(
+                            state.clone(),
+                            rid,
+                            next_active,
+                            next_turn,
+                            room.turn_limit,
+                        );
+                    }
+                }
+
+                // Re-fetch and broadcast updated RoomInfo
+                if let Some(updated_room) = state.room_manager.get_room(&rid).await {
+                    let info_msg = ServerMessage::RoomInfo { room: updated_room.clone() };
+                    RoomManager::broadcast_room(&state.session_manager, &updated_room, &info_msg);
+                }
+            }
+        }
+    }
+    state.session_manager.remove_session(player_id);
+}
 
                                 pub fn start_turn_timer(
                                     state: Arc<AppState>,
@@ -525,7 +641,7 @@ async fn handle_player_disconnect(
                                     tokio::spawn(async move {
                                         tokio::time::sleep(tokio::time::Duration::from_secs(secs as u64)).await;
 
-                                        let room_opt = state.room_manager.get_room(&room_id).await;
+                                                let room_opt = state.room_manager.get_room(&room_id).await;
                                         if let Some(room) = room_opt {
                                             if room.status == crate::room::room_status::RoomStatus::Playing {
                                                 if let Some(game_state) = &room.game_state {
@@ -533,12 +649,15 @@ async fn handle_player_disconnect(
                                                         println!("Room {} Player {} turn timed out!", room_id, player_id);
 
                                                         let is_sam = if let Some(g_state) = &room.game_state { g_state.is_sam_phase } else { false };
-                                                        let auto_play_cards = game_state.last_played_cards.is_empty() && !is_sam;
+                                                        let mut auto_play_cards = game_state.last_played_cards.is_empty() && !is_sam;
                                                         let mut auto_cards = Vec::new();
 
                                                         if auto_play_cards {
                                                             if let Some(hand) = game_state.hands.get(&player_id) {
-                                                                if !hand.is_empty() {
+                                                                let only_twos = !hand.is_empty() && hand.iter().all(|&c| c / 4 == 12);
+                                                                if only_twos {
+                                                                    auto_play_cards = false;
+                                                                } else if !hand.is_empty() {
                                                                     let mut sorted_hand = hand.clone();
                                                                     sorted_hand.sort_by(|a, b| {
                                                                         let get_w = |c: u8| {
@@ -558,7 +677,18 @@ async fn handle_player_disconnect(
                                                         let mut action_success = false;
                                                         let mut error_msg = None;
 
-                                                        if auto_play_cards && !auto_cards.is_empty() {
+                                                        if is_sam {
+                                                            if let Some(sam_res) = state.room_manager.force_resolve_room_sam(room_id).await {
+                                                                match sam_res {
+                                                                    Ok(_) => {
+                                                                        action_success = true;
+                                                                    }
+                                                                    Err(e) => {
+                                                                        error_msg = Some(e);
+                                                                    }
+                                                                }
+                                                            }
+                                                        } else if auto_play_cards && !auto_cards.is_empty() {
                                                             if let Some(play_res) = state.room_manager.play_room_cards(room_id, player_id, &auto_cards).await {
                                                                 match play_res {
                                                                     Ok(ended) => {
@@ -600,6 +730,13 @@ async fn handle_player_disconnect(
                                                                             RoomManager::broadcast_room(&state.session_manager, &fresh_room, &info_msg);
                                                                         }
                                                                     } else {
+                                                                        if is_sam {
+                                                                            if let Some(announcer) = updated_game_state.sam_announcer {
+                                                                                let sam_msg = ServerMessage::SamAnnounced { player_id: announcer };
+                                                                                RoomManager::broadcast_room(&state.session_manager, &updated_room, &sam_msg);
+                                                                            }
+                                                                        }
+
                                                                         let mut card_counts = std::collections::HashMap::new();
                                                                         for (&p_id, hand) in &updated_game_state.hands {
                                                                             card_counts.insert(p_id, hand.len());
@@ -613,6 +750,7 @@ async fn handle_player_disconnect(
                                                                             passed_players: updated_game_state.passed_players.clone(),
                                                                             is_sam_phase: updated_game_state.is_sam_phase,
                                                                             player_golds: updated_room.player_golds.clone(),
+                                                                            sam_choices: updated_game_state.sam_choices.clone(),
                                                                         };
                                                                         RoomManager::broadcast_room(&state.session_manager, &updated_room, &turn_msg);
 
