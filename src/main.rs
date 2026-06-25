@@ -17,8 +17,8 @@ async fn main() -> Result<(), IoError> {
         .await
         .expect("Failed to connect to the database");
 
-    let http = tokio::spawn(start_http_server(host, db));
-    let ws = tokio::spawn(start_ws_server(ws_host));
+    let http = tokio::spawn(start_http_server(host, db.clone()));
+    let ws = tokio::spawn(start_ws_server(ws_host, db));
 
     let _ = tokio::join!(http, ws);
     Ok(())

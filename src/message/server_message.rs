@@ -14,6 +14,12 @@ pub enum ServerMessage {
     RoomInfo { room: Room },
 
     Error { message: String },
+    UserProfile {
+        user_id: u64,
+        display_name: String,
+        avatar_url: String,
+        gold: i64,
+    },
 
     PlayerReadyUpdated { user_id: u64, ready: bool },
     GameStarted { hand: Vec<u8> },

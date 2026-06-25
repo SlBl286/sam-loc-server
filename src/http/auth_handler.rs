@@ -19,6 +19,9 @@ pub struct LoginResponse {
     pub token: String,
     pub user_id: i64,
     pub username: String,
+    pub display_name: String,
+    pub avatar_url: String,
+    pub gold: i64,
 }
 
 pub async fn login(
@@ -35,11 +38,18 @@ pub async fn login(
 
     let token = create_token(user.id);
 
+    let profile = check_and_update_weekly_bonus(&db, user.id as u64)
+        .await
+        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Failed to load user profile".to_string()))?;
+
     Ok(Json(LoginResponse {
         token,
         user_id: user.id,
         username: user.username,
         res_type: "login".into(),
+        display_name: profile.display_name,
+        avatar_url: profile.avatar_url,
+        gold: profile.gold,
     }))
 }
 

@@ -74,6 +74,24 @@ pub async fn handle_connection(
                                         cancel.clone(),
                                     ));
                                 }
+                                let profile = crate::database::user_repo::check_and_update_weekly_bonus(&state.db, user_id).await;
+                                let user_profile = match profile {
+                                    Some(p) => ServerMessage::UserProfile {
+                                        user_id,
+                                        display_name: p.display_name,
+                                        avatar_url: p.avatar_url,
+                                        gold: p.gold,
+                                    },
+                                    None => ServerMessage::UserProfile {
+                                        user_id,
+                                        display_name: format!("Guest_{}", user_id),
+                                        avatar_url: "".to_string(),
+                                        gold: 500000,
+                                    },
+                                };
+                                let profile_json = serde_json::to_string(&user_profile).unwrap();
+                                let _ = tx.send(Message::Text(profile_json.into()));
+
                                 ServerMessage::RoomList {
                                     rooms: state.room_manager.get_rooms().await,
                                 }
@@ -171,6 +189,19 @@ pub async fn handle_connection(
                                         .remove_player_from_room(room_id, player_id)
                                         .await;
                                     ctx.room_id = None;
+
+                                    // Send updated user profile to the leaving player to sync gold balance in lobby
+                                    if let Some(p) = crate::database::user_repo::get_user_profile(&state.db, player_id).await {
+                                        let user_profile_msg = ServerMessage::UserProfile {
+                                            user_id: player_id,
+                                            display_name: p.display_name,
+                                            avatar_url: p.avatar_url,
+                                            gold: p.gold,
+                                        };
+                                        if let Ok(profile_json) = serde_json::to_string(&user_profile_msg) {
+                                            let _ = tx.send(Message::Text(profile_json.into()));
+                                        }
+                                    }
 
                                     let room_list_msg = ServerMessage::RoomList {
                                         rooms: state.room_manager.get_rooms().await,
@@ -280,6 +311,7 @@ pub async fn handle_connection(
                                                                         sam_announcer: game_state.sam_announcer,
                                                                     };
                                                                     RoomManager::broadcast_room(&state.session_manager, &updated_room, &end_msg);
+                                                                    state.room_manager.save_room_golds(room_id).await;
                                                                     state.room_manager.reset_room_game_state(room_id).await;
                                                                     if let Some(fresh_room) = state.room_manager.get_room(&room_id).await {
                                                                         let info_msg = ServerMessage::RoomInfo { room: fresh_room.clone() };
@@ -360,6 +392,7 @@ pub async fn handle_connection(
                                                                 sam_announcer: game_state.sam_announcer,
                                                             };
                                                             RoomManager::broadcast_room(&state.session_manager, &room, &end_msg);
+                                                             state.room_manager.save_room_golds(room_id).await;
                                                              state.room_manager.reset_room_game_state(room_id).await;
                                                              if let Some(fresh_room) = state.room_manager.get_room(&room_id).await {
                                                                  let info_msg = ServerMessage::RoomInfo { room: fresh_room.clone() };
@@ -506,6 +539,52 @@ pub async fn handle_connection(
                                     }
                                 }
                                 ServerMessage::Error { message: "AnnounceSam processed".into() }
+                            }
+                            Ok(ClientMessage::UpdateProfile { display_name, avatar_url }) => {
+                                if let Some(player_id) = ctx.player_id {
+                                    let _ = sqlx::query!(
+                                        "UPDATE users SET display_name = $1, avatar_url = $2 WHERE id = $3",
+                                        display_name,
+                                        avatar_url,
+                                        player_id as i64
+                                    )
+                                    .execute(&state.db)
+                                    .await;
+
+                                    let updated_profile = if let Some(p) = crate::database::user_repo::get_user_profile(&state.db, player_id).await {
+                                        p
+                                    } else {
+                                        crate::database::user_repo::UserProfile {
+                                            display_name: display_name.clone(),
+                                            avatar_url: avatar_url.clone(),
+                                            gold: 500000,
+                                        }
+                                    };
+
+                                    let user_profile_msg = ServerMessage::UserProfile {
+                                        user_id: player_id,
+                                        display_name: updated_profile.display_name.clone(),
+                                        avatar_url: updated_profile.avatar_url.clone(),
+                                        gold: updated_profile.gold,
+                                    };
+                                    let profile_json = serde_json::to_string(&user_profile_msg).unwrap();
+                                    let _ = tx.send(Message::Text(profile_json.into()));
+
+                                    if let Some(room_id) = ctx.room_id {
+                                        state.room_manager.update_room_player_profile(
+                                            room_id,
+                                            player_id,
+                                            updated_profile.display_name,
+                                            updated_profile.avatar_url,
+                                        ).await;
+
+                                        if let Some(room) = state.room_manager.get_room(&room_id).await {
+                                            let info_msg = ServerMessage::RoomInfo { room: room.clone() };
+                                            RoomManager::broadcast_room(&state.session_manager, &room, &info_msg);
+                                        }
+                                    }
+                                }
+                                ServerMessage::Error { message: "Profile updated".to_string() }
                             }
                             Err(e) => ServerMessage::Error {
                                 message: format!("Invalid message: {}", e),
@@ -717,14 +796,15 @@ async fn handle_player_disconnect(
                                                             if let Some(updated_room) = state.room_manager.get_room(&room_id).await {
                                                                 if let Some(updated_game_state) = &updated_room.game_state {
                                                                     if game_ended {
-                                                                        let end_msg = ServerMessage::GameEnded {
-                                                                            winner_id: player_id,
-                                                                            reason: "Hết giờ - Tự động bỏ lượt".to_string(),
-                                                                            hands: updated_game_state.hands.clone(),
-                                                                            sam_announcer: updated_game_state.sam_announcer,
-                                                                        };
-                                                                        RoomManager::broadcast_room(&state.session_manager, &updated_room, &end_msg);
-                                                                        state.room_manager.reset_room_game_state(room_id).await;
+                                                                         let end_msg = ServerMessage::GameEnded {
+                                                                             winner_id: player_id,
+                                                                             reason: "Hết giờ - Tự động bỏ lượt".to_string(),
+                                                                             hands: updated_game_state.hands.clone(),
+                                                                             sam_announcer: updated_game_state.sam_announcer,
+                                                                         };
+                                                                         RoomManager::broadcast_room(&state.session_manager, &updated_room, &end_msg);
+                                                                         state.room_manager.save_room_golds(room_id).await;
+                                                                         state.room_manager.reset_room_game_state(room_id).await;
                                                                         if let Some(fresh_room) = state.room_manager.get_room(&room_id).await {
                                                                             let info_msg = ServerMessage::RoomInfo { room: fresh_room.clone() };
                                                                             RoomManager::broadcast_room(&state.session_manager, &fresh_room, &info_msg);

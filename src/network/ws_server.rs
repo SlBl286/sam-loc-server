@@ -7,15 +7,16 @@ use crate::{
     app_state, network::ws_handler::accept_connection, player::session_manager::SessionManager, room::room_manager::{IdGenerator, RoomManager}
 };
 
-pub async fn start_ws_server(host: String) -> Result<(), Error> {
+pub async fn start_ws_server(host: String, db: sqlx::PgPool) -> Result<(), Error> {
     let listener = TcpListener::bind(host.clone()).await.unwrap();
 
     println!("WebSocket server listen at ws://{}", host);
 
     let app_state = Arc::new(app_state::AppState {
         session_manager: Arc::new(SessionManager::new()),
-        room_manager: Arc::new(RoomManager::new()),
+        room_manager: Arc::new(RoomManager::new(db.clone())),
         id_generator: Arc::new(IdGenerator::new()),
+        db,
     });
 
     while let Ok((stream, addr)) = listener.accept().await {

@@ -15,6 +15,7 @@ pub struct LeaveRoomResult {
 
 pub struct RoomManager {
     rooms: DashMap<u32, Room>,
+    db: sqlx::PgPool,
 }
 pub struct IdGenerator {
     last_id: AtomicU32,
@@ -34,9 +35,10 @@ impl IdGenerator {
 }
 
 impl RoomManager {
-    pub fn new() -> Self {
+    pub fn new(db: sqlx::PgPool) -> Self {
         RoomManager {
             rooms: DashMap::new(),
+            db,
         }
     }
 
@@ -122,8 +124,16 @@ impl RoomManager {
     }
 
     pub async fn add_player_to_room(&self, room_id: u32, player_id: u64) -> usize {
+        let profile = crate::database::user_repo::get_user_profile(&self.db, player_id).await;
+        let (name, avatar, gold) = match profile {
+            Some(p) => (p.display_name, p.avatar_url, p.gold),
+            None => (format!("Guest_{}", player_id), "".to_string(), 500000),
+        };
+
         if let Some(mut room) = self.rooms.get_mut(&room_id) {
-            room.player_golds.entry(player_id).or_insert(100000);
+            room.player_names.insert(player_id, name);
+            room.player_avatars.insert(player_id, avatar);
+            room.player_golds.insert(player_id, gold);
             if room.players.len() >= room.max_players as usize {
                 if !room.spectators.contains(&player_id) {
                     room.spectators.push(player_id);
@@ -190,7 +200,7 @@ impl RoomManager {
 
             if escape_handled {
                 // Deduct gold from escaping player
-                let entry = room.player_golds.entry(player_id).or_insert(100000);
+                let entry = room.player_golds.entry(player_id).or_insert(500000);
                 *entry = (*entry - loss).max(0);
 
                 let room_players = room.players.clone();
@@ -202,7 +212,7 @@ impl RoomManager {
 
                     if let Some(&winner_id) = remaining_active.first() {
                         // Credit the winner
-                        let win_entry = room.player_golds.entry(winner_id).or_insert(100000);
+                        let win_entry = room.player_golds.entry(winner_id).or_insert(500000);
                         *win_entry += loss;
 
                         game_ended = Some((
@@ -224,8 +234,17 @@ impl RoomManager {
                     // Game continues. Split the penalty among remaining active players.
                     let split_win = loss / (remaining_active.len() as i64);
                     for &w_id in &remaining_active {
-                        let w_entry = room.player_golds.entry(w_id).or_insert(100000);
+                        let w_entry = room.player_golds.entry(w_id).or_insert(500000);
                         *w_entry += split_win;
+                    }
+
+                    // Reset the round if the escaping player was the last one who played cards
+                    if let Some(state) = room.game_state.as_mut() {
+                        if state.last_played_by == Some(player_id) {
+                            state.last_played_cards.clear();
+                            state.last_played_by = None;
+                            state.passed_players.clear();
+                        }
                     }
 
                     // If it was their turn, move to the next player
@@ -245,6 +264,17 @@ impl RoomManager {
                         }
                     }
                 }
+            }
+
+            // Save updated golds to database
+            for (&p_id, &g) in &room.player_golds {
+                let _ = sqlx::query!(
+                    "UPDATE users SET gold = $1 WHERE id = $2",
+                    g,
+                    p_id as i64
+                )
+                .execute(&self.db)
+                .await;
             }
 
             if room.players.is_empty() {
@@ -274,5 +304,26 @@ impl RoomManager {
         targets.extend(&room.spectators);
         let text = serde_json::to_string(msg).unwrap();
         session_manager.broadcast(&targets, Message::Text(text.into()));
+    }
+
+    pub async fn update_room_player_profile(&self, room_id: u32, player_id: u64, name: String, avatar: String) {
+        if let Some(mut room) = self.rooms.get_mut(&room_id) {
+            room.player_names.insert(player_id, name);
+            room.player_avatars.insert(player_id, avatar);
+        }
+    }
+
+    pub async fn save_room_golds(&self, room_id: u32) {
+        if let Some(room) = self.rooms.get(&room_id) {
+            for (&player_id, &gold) in &room.player_golds {
+                let _ = sqlx::query!(
+                    "UPDATE users SET gold = $1 WHERE id = $2",
+                    gold,
+                    player_id as i64
+                )
+                .execute(&self.db)
+                .await;
+            }
+        }
     }
 }

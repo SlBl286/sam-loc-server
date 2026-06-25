@@ -6,6 +6,7 @@ pub struct AppState {
     pub id_generator: Arc<room::room_manager::IdGenerator>,
     pub session_manager: Arc<player::session_manager::SessionManager>,
     pub room_manager: Arc<room::room_manager::RoomManager>,
+    pub db: sqlx::PgPool,
 }
 
 

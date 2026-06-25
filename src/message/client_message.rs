@@ -22,4 +22,8 @@ pub enum ClientMessage {
   Unready,
   PassTurn,
   AnnounceSam,
+  UpdateProfile {
+      display_name: String,
+      avatar_url: String,
+  },
 }

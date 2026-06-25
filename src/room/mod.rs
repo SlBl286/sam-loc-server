@@ -38,6 +38,8 @@ pub struct Room {
     pub first_player: Option<u64>,
     pub player_golds: HashMap<u64, i64>,
     pub spectators: Vec<u64>,
+    pub player_names: HashMap<u64, String>,
+    pub player_avatars: HashMap<u64, String>,
 }
 
 impl Room {
@@ -56,6 +58,8 @@ impl Room {
             first_player: None,
             player_golds: HashMap::new(),
             spectators: Vec::new(),
+            player_names: HashMap::new(),
+            player_avatars: HashMap::new(),
         }
     }
 
@@ -213,6 +217,17 @@ impl Room {
         // Rule: cannot play 2 as the last card/combination
         if played.len() == hand.len() && played.iter().any(|&c| crate::game::get_rank(c) == 12) {
             return Err("Không được đánh 2 cuối cùng!".into());
+        }
+
+        // Rule: cannot play cards that leave the hand with only 2s (thối hai)
+        if played.len() < hand.len() {
+            let remaining_count = hand.len() - played.len();
+            let total_twos = hand.iter().filter(|&&c| crate::game::get_rank(c) == 12).count();
+            let played_twos = played.iter().filter(|&&c| crate::game::get_rank(c) == 12).count();
+            let remaining_twos = total_twos - played_twos;
+            if remaining_twos == remaining_count {
+                return Err("Không được đánh nước đi để lại toàn quân 2 (thối hai)!".into());
+            }
         }
 
         // Rule: if player has only 2s left, they can only pass
